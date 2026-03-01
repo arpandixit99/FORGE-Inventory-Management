@@ -1,0 +1,2039 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>FORGE — Autonomous Inventory Brain</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Syne:wght@700;800&family=Space+Grotesk:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #020917; font-family: 'Inter', 'Segoe UI', system-ui, sans-serif; font-size: 16px; line-height: 1.7; }
+  ::-webkit-scrollbar { width: 3px; }
+  ::-webkit-scrollbar-thumb { background: rgba(56,189,248,.2); border-radius: 9px; }
+  input::placeholder, textarea::placeholder { color: #2a3545; }
+  select option { background: #050d1a; }
+  button:hover { opacity: .8; }
+  /* Professional typography overrides */
+  h1,h2,h3 { font-family: 'Space Grotesk', sans-serif; }
+  .forge-brand { font-family: 'Space Grotesk', sans-serif; font-weight: 800; }
+  th { font-family: 'Inter', sans-serif; font-weight: 600; letter-spacing: .04em; }
+  td { font-family: 'Inter', sans-serif; }
+  label { font-family: 'Inter', sans-serif; font-weight: 600; }
+  /* Smooth rendering */
+  * { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
+  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.1} }
+  @keyframes spin { to{transform:rotate(360deg)} }
+  @keyframes flt { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-6px)} }
+  @keyframes si { from{opacity:0;transform:translateY(-8px)} to{opacity:1;transform:translateY(0)} }
+  @keyframes pulse { 0%,100%{transform:scale(1);opacity:.3} 50%{transform:scale(1.8);opacity:1} }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+// In-memory storage shim — works in any browser
+var _store = {};
+window.storage = {
+  set: function(k, v) { _store[k] = v; return Promise.resolve({ key: k, value: v }); },
+  get: function(k) { return Promise.resolve(_store[k] !== undefined ? { key: k, value: _store[k] } : null); },
+  delete: function(k) { delete _store[k]; return Promise.resolve({ key: k, deleted: true }); }
+};
+</script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://unpkg.com/@zxing/library@0.18.6/umd/index.min.js"></script>
+<script type="text/babel">
+var useState = React.useState;
+var useEffect = React.useEffect;
+var useRef = React.useRef;
+var useCallback = React.useCallback;
+
+var SEED = [
+  {id:1, name:"Steel Bolts M8",     qty:1200, reorder:500,  usage:80,  lead:3,  supplier:"FastenerPro Ltd",    cost:0.12, unit:"pcs",  location:"Main Warehouse"},
+  {id:2, name:"Aluminum Brackets",  qty:85,   reorder:100,  usage:12,  lead:7,  supplier:"MetalWorks Inc",     cost:4.50, unit:"pcs",  location:"Main Warehouse"},
+  {id:3, name:"Hydraulic Seals",    qty:30,   reorder:50,   usage:8,   lead:5,  supplier:"SealTech Global",    cost:2.80, unit:"pcs",  location:"Store Room"},
+  {id:4, name:"Conveyor Belts",     qty:4,    reorder:3,    usage:0.2, lead:14, supplier:"BeltMaster Co",      cost:320,  unit:"pcs",  location:"Main Warehouse"},
+  {id:5, name:"Lubricant Oil 5L",   qty:22,   reorder:10,   usage:1.5, lead:2,  supplier:"OilChem Supply",     cost:18,   unit:"cans", location:"Store Room"},
+  {id:6, name:"Drive Shafts",       qty:6,    reorder:10,   usage:1,   lead:10, supplier:"PrecisionDrive Ltd", cost:145,  unit:"pcs",  location:"Site A"},
+  {id:7, name:"Gaskets 200mm",      qty:320,  reorder:150,  usage:20,  lead:4,  supplier:"SealTech Global",    cost:0.85, unit:"pcs",  location:"Main Warehouse"},
+  {id:8, name:"Pneumatic Fittings", qty:18,   reorder:40,   usage:5,   lead:6,  supplier:"AirParts Depot",     cost:6.20, unit:"pcs",  location:"Site A"},
+  {id:9, name:"Bearing 6205",       qty:55,   reorder:30,   usage:4,   lead:5,  supplier:"RollBear Global",    cost:9.90, unit:"pcs",  location:"Main Warehouse"},
+  {id:10,name:"Control PCB Boards", qty:3,    reorder:5,    usage:0.3, lead:21, supplier:"CircuitPro Asia",    cost:480,  unit:"pcs",  location:"Store Room"}
+];
+
+var LOCATIONS = ["Main Warehouse","Store Room","Site A","Site B","Cold Storage","Workshop"];
+
+function N(v, fb) { if (fb === undefined) fb = 0; var x = parseFloat(v); return isNaN(x) ? fb : x; }
+function uid() { return Math.random().toString(36).slice(2,8).toUpperCase(); }
+function getStatus(i) { return i.qty <= i.reorder * 0.5 ? "critical" : i.qty <= i.reorder ? "low" : "ok"; }
+function getDays(i) { return i.usage > 0 ? Math.floor(i.qty / i.usage) : 999; }
+function getSugQty(i) { return Math.ceil(i.usage * (i.lead * 2 + 14)); }
+function getDeliv(i) { var d = new Date(); d.setDate(d.getDate() + i.lead); return d.toLocaleDateString("en-US", {month:"short", day:"numeric"}); }
+function getNow() { return new Date().toLocaleTimeString("en-US", {hour:"2-digit", minute:"2-digit"}); }
+function fmt(v) { return "₹" + Number(v).toLocaleString("en-IN", {minimumFractionDigits:2, maximumFractionDigits:2}); }
+var TAX = 0.08;
+
+var SCFG = {
+  critical: {c:"#f87171", bg:"rgba(248,113,113,.12)", l:"CRITICAL"},
+  low:      {c:"#fbbf24", bg:"rgba(251,191,36,.12)",  l:"LOW"},
+  ok:       {c:"#34d399", bg:"rgba(52,211,153,.12)",  l:"OK"}
+};
+var BCFG = {
+  draft:   {c:"#fbbf24", bg:"rgba(251,191,36,.12)",  l:"DRAFT"},
+  issued:  {c:"#38bdf8", bg:"rgba(56,189,248,.12)",  l:"ISSUED"},
+  paid:    {c:"#34d399", bg:"rgba(52,211,153,.12)",  l:"PAID"},
+  overdue: {c:"#f87171", bg:"rgba(248,113,113,.12)", l:"OVERDUE"}
+};
+var SK = {inv:"f:inv", bills:"f:bills", mem:"f:mem", meta:"f:meta"};
+
+function ss(k, v) {
+  try { return window.storage.set(k, JSON.stringify(v)); }
+  catch(e) { return Promise.resolve(null); }
+}
+function sl(k) {
+  try {
+    return window.storage.get(k).then(function(r) {
+      return r ? JSON.parse(r.value) : null;
+    });
+  } catch(e) { return Promise.resolve(null); }
+}
+function sd(k) {
+  try { return window.storage.delete(k); }
+  catch(e) { return Promise.resolve(null); }
+}
+
+function oAlerts(inv) {
+  var result = [];
+  for (var i = 0; i < inv.length; i++) {
+    var item = inv[i];
+    var st = getStatus(item);
+    var dl = getDays(item);
+    if (st === "critical") {
+      result.push({id:uid(), sev:"critical", item:item.name,
+        msg: item.qty + " " + item.unit + " — " + (dl===999?"∞":dl+"d") + " left. Below reorder " + item.reorder + ".",
+        act: "Order " + getSugQty(item) + " " + item.unit + " from " + item.supplier, t:getNow()});
+    } else if (st === "low" && dl <= item.lead + 3) {
+      result.push({id:uid(), sev:"warning", item:item.name,
+        msg: dl + "d of stock — reorder before delivery.",
+        act: "Order " + getSugQty(item) + " " + item.unit + " within 2 days", t:getNow()});
+    }
+    if (result.length >= 4) break;
+  }
+  return result;
+}
+
+function oSugg(inv) {
+  var filtered = inv.filter(function(i) { return getStatus(i) !== "ok" || getDays(i) < 20; });
+  filtered.sort(function(a, b) {
+    var order = {critical:0, low:1, ok:2};
+    return order[getStatus(a)] - order[getStatus(b)];
+  });
+  return filtered.slice(0, 4).map(function(i) {
+    var qty = getSugQty(i);
+    return {
+      id: uid(), item: i.name,
+      urgency: getStatus(i) === "critical" ? "URGENT" : getStatus(i) === "low" ? "SOON" : "PLANNED",
+      qty: qty, unit: i.unit,
+      reason: i.qty + " " + i.unit + " left — " + (getDays(i)===999?"∞":getDays(i)+"d"),
+      cost: parseFloat((qty * i.cost).toFixed(2)),
+      supplier: i.supplier, delivery: getDeliv(i)
+    };
+  });
+}
+
+function oChat(msg, inv, mem, bills) {
+  var m = msg.toLowerCase();
+  function has() { for (var i=0; i<arguments.length; i++) if (m.indexOf(arguments[i]) >= 0) return true; return false; }
+  var cr = inv.filter(function(i) { return getStatus(i) === "critical"; });
+  var lw = inv.filter(function(i) { return getStatus(i) === "low"; });
+  var tv = inv.reduce(function(a,i) { return a + i.qty*i.cost; }, 0);
+
+  if (has("critical","urgent","emergency")) {
+    if (!cr.length) return "✓ No critical items. " + lw.length + " items low.";
+    return "**" + cr.length + " CRITICAL items:**\n\n" + cr.map(function(i) {
+      return "• **" + i.name + "** — " + i.qty + " " + i.unit + ", " + getDays(i) + "d left\n  → Order " + getSugQty(i) + " from " + i.supplier;
+    }).join("\n\n");
+  }
+  if (has("stock","inventory","overview","status")) {
+    return "**Inventory: " + inv.length + " items**\n\n• Critical: " + cr.length + "\n• Low: " + lw.length + "\n• OK: " + (inv.length-cr.length-lw.length) + "\n• Total value: " + fmt(tv);
+  }
+  if (has("order","suggest","restock")) {
+    var t = inv.filter(function(i) { return getStatus(i) !== "ok"; });
+    if (!t.length) return "✓ No orders needed.";
+    return "**" + t.length + " items to order:**\n\n" + t.map(function(i, n) {
+      return (n+1) + ". **" + i.name + "** — " + getSugQty(i) + " " + i.unit + " · " + fmt(getSugQty(i)*i.cost);
+    }).join("\n");
+  }
+  if (has("bill","invoice","revenue")) {
+    if (!bills.length) return "No invoices yet.";
+    var paidRev = bills.filter(function(b){return b.status==="paid";}).reduce(function(a,b){return a+b.total;},0);
+    var outstanding = bills.filter(function(b){return b.status==="draft"||b.status==="issued";}).reduce(function(a,b){return a+b.total;},0);
+    return "**Billing:**\n\n• " + bills.length + " invoices\n• Revenue: " + fmt(paidRev) + "\n• Outstanding: " + fmt(outstanding);
+  }
+  if (has("days","runout","stockout")) {
+    var sorted = inv.filter(function(i){return i.usage>0;}).sort(function(a,b){return getDays(a)-getDays(b);}).slice(0,5);
+    return "**Soonest stockouts:**\n\n" + sorted.map(function(i) { return "• **" + i.name + ":** " + getDays(i) + "d — " + getStatus(i).toUpperCase(); }).join("\n");
+  }
+  if (has("hello","hi","hey")) {
+    return "👋 **FORGE online!**\n\n" + (cr.length ? "⚠ " + cr.length + " critical items!" : "✓ All stable.") + "\n\nAsk: stock · orders · billing · days to stockout";
+  }
+  var fi = null;
+  for (var i = 0; i < inv.length; i++) {
+    if (m.indexOf(inv[i].name.toLowerCase()) >= 0) { fi = inv[i]; break; }
+  }
+  if (fi) {
+    return "**" + fi.name + "**\n\n• " + getStatus(fi).toUpperCase() + " | " + fi.qty + " " + fi.unit + " | " + (getDays(fi)===999?"∞":getDays(fi)+"d") + " left\n• " + fi.usage + "/day | Lead " + fi.lead + "d | " + fmt(fi.cost) + "/unit\n• Value: " + fmt(fi.qty*fi.cost) + (getStatus(fi)!=="ok" ? "\n\n→ Order " + getSugQty(fi) + " by " + getDeliv(fi) : "");
+  }
+  return "**FORGE Brain** — Try:\n• \"What's critical?\" · \"Order suggestions\"\n• \"Stock overview\" · \"Billing\" · Item names";
+}
+
+function getApiKey() {
+  return localStorage.getItem("forge_api_key") || "";
+}
+function callAI(sys, usr, json) {
+  var apiKey = getApiKey();
+  return fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {"Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true"},
+    body: JSON.stringify({model:"claude-sonnet-4-20250514", max_tokens:1000, system:sys, messages:[{role:"user",content:usr}]})
+  }).then(function(r) {
+    if (!r.ok) throw new Error(r.status);
+    return r.json();
+  }).then(function(d) {
+    var t = (d.content || []).map(function(b){return b.text||"";}).join("");
+    if (json) { try { return JSON.parse(t.replace(/```json|```/g,"").trim()); } catch(e) { return null; } }
+    return t;
+  });
+}
+
+function makeSnap(inv, mem) {
+  var lines = inv.map(function(i) {
+    return i.name+":"+i.qty+i.unit+"|"+i.usage+"/d|ro"+i.reorder+"|"+i.lead+"d|₹"+i.cost+"|"+getStatus(i)+"|"+getDays(i)+"d";
+  });
+  if (mem.length) {
+    lines.push("DECISIONS:");
+    mem.slice(-4).forEach(function(m){ lines.push("- "+m); });
+  }
+  return lines.join("\n");
+}
+
+// ── Canvas Background ──
+function BG() {
+  var canvasRef = useRef(null);
+  useEffect(function() {
+    var c = canvasRef.current;
+    if (!c) return;
+    var ctx = c.getContext("2d");
+    var aid, t = 0, frame = 0;
+
+    // Sparse floating nodes
+    var nodes = [];
+    for (var i = 0; i < 28; i++) {
+      nodes.push({
+        x: Math.random()*1600, y: Math.random()*900,
+        vx: (Math.random()-.5)*0.18,
+        vy: (Math.random()-.5)*0.18,
+        r: Math.random()*1.2+0.4,
+        phase: Math.random()*6.28,
+        col: [[56,189,248],[129,140,248],[52,211,153]][Math.floor(Math.random()*3)]
+      });
+    }
+
+    // Vertical scan lines falling slowly
+    var scanLines = [];
+    function spawnScan(W, H) {
+      scanLines.push({
+        x: Math.floor(Math.random()*(W/40))*40, // snap to grid columns
+        y: -Math.random()*H,
+        vy: 0.5 + Math.random()*0.6,
+        alpha: 0.12 + Math.random()*0.12,
+        col: [[56,189,248],[129,140,248],[52,211,153]][Math.floor(Math.random()*3)],
+        h: 60 + Math.random()*120
+      });
+    }
+
+    // Horizontal sweep line
+    var sweepY = 0;
+
+    function draw() {
+      var W = c.width = c.offsetWidth;
+      var H = c.height = c.offsetHeight;
+      ctx.clearRect(0, 0, W, H);
+      t += 0.003;
+      frame++;
+
+      // 1. Subtle dot grid
+      ctx.fillStyle = "rgba(56,189,248,0.08)";
+      for (var gx = 0; gx < W; gx += 40) {
+        for (var gy = 0; gy < H; gy += 40) {
+          ctx.beginPath();
+          ctx.arc(gx, gy, 0.8, 0, 6.28);
+          ctx.fill();
+        }
+      }
+
+      // 2. Single slow horizontal sweep line
+      sweepY += 0.4;
+      if (sweepY > H) sweepY = 0;
+      var sg = ctx.createLinearGradient(0, sweepY-60, 0, sweepY+4);
+      sg.addColorStop(0, "transparent");
+      sg.addColorStop(0.7, "rgba(56,189,248,0.025)");
+      sg.addColorStop(1, "rgba(56,189,248,0.06)");
+      ctx.fillStyle = sg;
+      ctx.fillRect(0, sweepY-60, W, 64);
+      // Bright edge line
+      ctx.strokeStyle = "rgba(56,189,248,0.12)";
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(0, sweepY); ctx.lineTo(W, sweepY); ctx.stroke();
+
+      // 3. Vertical scan lines (slow falling)
+      if (frame % 80 === 0 && scanLines.length < 8) spawnScan(W, H);
+      scanLines = scanLines.filter(function(s){ return s.y < H + s.h; });
+      scanLines.forEach(function(s) {
+        s.y += s.vy;
+        var sg2 = ctx.createLinearGradient(s.x, s.y, s.x, s.y + s.h);
+        sg2.addColorStop(0, "transparent");
+        sg2.addColorStop(0.4, "rgba("+s.col[0]+","+s.col[1]+","+s.col[2]+","+s.alpha+")");
+        sg2.addColorStop(1, "transparent");
+        ctx.strokeStyle = sg2;
+        ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(s.x, s.y); ctx.lineTo(s.x, s.y+s.h); ctx.stroke();
+      });
+
+      // 4. Node network — sparse connections only when very close
+      for (var i = 0; i < nodes.length; i++) {
+        for (var j = i+1; j < nodes.length; j++) {
+          var dx = nodes[i].x-nodes[j].x, dy = nodes[i].y-nodes[j].y;
+          var d = Math.sqrt(dx*dx+dy*dy);
+          if (d < 130) {
+            ctx.strokeStyle = "rgba(56,189,248,"+(0.06*(1-d/130))+")";
+            ctx.lineWidth = 0.5;
+            ctx.beginPath(); ctx.moveTo(nodes[i].x,nodes[i].y); ctx.lineTo(nodes[j].x,nodes[j].y); ctx.stroke();
+          }
+        }
+      }
+
+      // 5. Nodes — tiny, crisp dots with soft pulse
+      nodes.forEach(function(n) {
+        n.x += n.vx; n.y += n.vy; n.phase += 0.02;
+        if (n.x<0||n.x>W) n.vx*=-1;
+        if (n.y<0||n.y>H) n.vy*=-1;
+        var pulse = Math.sin(n.phase)*0.5+0.5;
+        var a = 0.25 + pulse*0.45;
+        // Outer glow
+        var ng = ctx.createRadialGradient(n.x,n.y,0,n.x,n.y,n.r*5);
+        ng.addColorStop(0,"rgba("+n.col[0]+","+n.col[1]+","+n.col[2]+","+(a*0.25)+")");
+        ng.addColorStop(1,"transparent");
+        ctx.fillStyle = ng;
+        ctx.beginPath(); ctx.arc(n.x,n.y,n.r*5,0,6.28); ctx.fill();
+        // Sharp core dot
+        ctx.fillStyle = "rgba("+n.col[0]+","+n.col[1]+","+n.col[2]+","+a+")";
+        ctx.beginPath(); ctx.arc(n.x,n.y,n.r,0,6.28); ctx.fill();
+      });
+
+      // 6. Corner brackets (techy UI feel)
+      var bSize = 18, bAlpha = 0.12;
+      [[0,0,1,1],[W,0,-1,1],[0,H,1,-1],[W,H,-1,-1]].forEach(function(b) {
+        ctx.strokeStyle = "rgba(56,189,248,"+bAlpha+")";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(b[0]+b[2]*bSize, b[1]);
+        ctx.lineTo(b[0], b[1]);
+        ctx.lineTo(b[0], b[1]+b[3]*bSize);
+        ctx.stroke();
+      });
+
+      aid = requestAnimationFrame(draw);
+    }
+    draw();
+    return function() { cancelAnimationFrame(aid); };
+  }, []);
+  return <canvas ref={canvasRef} style={{position:"fixed",inset:0,width:"100%",height:"100%",pointerEvents:"none",zIndex:0}}/>;
+}
+
+function Logo(props) {
+  var sz = props.sz || 40;
+  var spin = props.spin || false;
+  return (
+    <svg width={sz} height={sz} viewBox="0 0 80 80" style={{filter:"drop-shadow(0 0 8px rgba(56,189,248,.7))",flexShrink:0,animation:spin?"spin 3s linear infinite":"flt 4s ease-in-out infinite"}}>
+      <defs>
+        <linearGradient id="G" x1="0%" y1="0%" x2="100%" y2="100%">
+          <stop offset="0%" stopColor="#38bdf8"/>
+          <stop offset="50%" stopColor="#818cf8"/>
+          <stop offset="100%" stopColor="#34d399"/>
+        </linearGradient>
+      </defs>
+      <polygon points="40,4 70,21 70,59 40,76 10,59 10,21" fill="none" stroke="url(#G)" strokeWidth="2.5" opacity=".9"/>
+      <polygon points="40,18 60,29 60,51 40,62 20,51 20,29" fill="rgba(56,189,248,.07)" stroke="url(#G)" strokeWidth="1.2" opacity=".6"/>
+      {[[40,4],[70,21],[70,59],[40,76],[10,59],[10,21]].map(function(pt,i){
+        return <circle key={i} cx={pt[0]} cy={pt[1]} r="3" fill="#38bdf8"/>;
+      })}
+      <circle cx="40" cy="40" r="9" fill="none" stroke="url(#G)" strokeWidth="1.8"/>
+      <circle cx="40" cy="40" r="3.5" fill="#38bdf8"/>
+      <line x1="40" y1="31" x2="40" y2="49" stroke="url(#G)" strokeWidth="1.2" opacity=".7"/>
+      <line x1="31" y1="40" x2="49" y2="40" stroke="url(#G)" strokeWidth="1.2" opacity=".7"/>
+    </svg>
+  );
+}
+
+function Md(props) {
+  var text = props.text || "";
+  return (
+    <div style={{lineHeight:1.8, fontSize:15}}>
+      {text.split("\n").map(function(l, i) {
+        var b = l.indexOf("• ") === 0 || l.indexOf("- ") === 0;
+        var html = l.replace(/\*\*(.+?)\*\*/g, '<b style="color:#38bdf8">$1</b>') || "&nbsp;";
+        return <div key={i} style={{marginBottom:b?3:1,paddingLeft:b?10:0,borderLeft:b?"2px solid rgba(56,189,248,.4)":"none",marginLeft:b?4:0}} dangerouslySetInnerHTML={{__html:html}}/>;
+      })}
+    </div>
+  );
+}
+
+function IS(err) {
+  return {width:"100%",padding:"8px 10px",background:"rgba(255,255,255,.05)",border:"1px solid "+(err?"#f87171":"rgba(56,189,248,.2)"),borderRadius:6,color:"#e2e8f0",outline:"none",fontFamily:"'Inter','Segoe UI',sans-serif",fontSize:15.5,boxSizing:"border-box"};
+}
+
+function Btn(props) {
+  var style = Object.assign({cursor:"pointer",fontFamily:"'Inter','Segoe UI',system-ui,sans-serif"}, props.style || {});
+  var newProps = Object.assign({}, props, {style: style});
+  return <button {...newProps}/>;
+}
+
+function LBL(props) {
+  var span = props.span || 1;
+  return (
+    <div style={{gridColumn:"span "+span,display:"flex",flexDirection:"column",gap:4}}>
+      <label style={{fontSize:12,color:props.err?"#f87171":"#4a5568",letterSpacing:2,textTransform:"uppercase"}}>{props.l}</label>
+      {props.children}
+      {props.err && <span style={{fontSize:12,color:"#f87171"}}>{props.err}</span>}
+    </div>
+  );
+}
+
+// ── Main App ──
+function App() {
+  var _inv = useState(SEED);           var inv = _inv[0],  setInv = _inv[1];
+  var _bills = useState([]);           var bills = _bills[0], setBills = _bills[1];
+  var _mem = useState([]);             var mem = _mem[0],  setMem = _mem[1];
+  var _loaded = useState(false);       var loaded = _loaded[0], setLoaded = _loaded[1];
+  var _saving = useState(false);       var saving = _saving[0], setSaving = _saving[1];
+  var _savedAt = useState(null);       var savedAt = _savedAt[0], setSavedAt = _savedAt[1];
+  var _view = useState("brain");       var view = _view[0], setView = _view[1];
+  var _busy = useState(false);         var busy = _busy[0], setBusy = _busy[1];
+  var _aiOn = useState(false);         var aiOn = _aiOn[0], setAiOn = _aiOn[1];
+  var _netChk = useState(true);        var netChk = _netChk[0], setNetChk = _netChk[1];
+  var _alts = useState([]);            var alts = _alts[0], setAlts = _alts[1];
+  var _sugg = useState([]);            var sugg = _sugg[0], setSugg = _sugg[1];
+  var _log = useState([]);             var log = _log[0], setLog = _log[1];
+  var _brief = useState(null);         var brief = _brief[0], setBrief = _brief[1];
+  var _briefOpen = useState(false);    var briefOpen = _briefOpen[0], setBriefOpen = _briefOpen[1];
+  var _settings = useState(false);     var settings = _settings[0], setSettings = _settings[1];
+  var _apiKey = useState(getApiKey());  var apiKey = _apiKey[0], setApiKeyState = _apiKey[1];
+  var _msgs = useState([]);            var msgs = _msgs[0], setMsgs = _msgs[1];
+  var _cin = useState("");             var cin = _cin[0], setCin = _cin[1];
+  var _chatBusy = useState(false);     var chatBusy = _chatBusy[0], setChatBusy = _chatBusy[1];
+  var _filter = useState("all");       var filter = _filter[0], setFilter = _filter[1];
+  var _toast = useState(null);         var toast = _toast[0], setToast = _toast[1];
+  var _countdown = useState(7200);     var countdown = _countdown[0], setCountdown = _countdown[1];
+  var _mf = useState({name:"",qty:"",unit:"pcs",reorder:"",usage:"",lead:"",supplier:"",cost:""});
+  var mf = _mf[0], setMf = _mf[1];
+  var _mErr = useState({});            var mErr = _mErr[0], setMErr = _mErr[1];
+  var _billingView = useState("list"); var billingView = _billingView[0], setBillingView = _billingView[1];
+  var _activeBill = useState(null);    var activeBill = _activeBill[0], setActiveBill = _activeBill[1];
+  var _bfilt = useState("all");        var bfilt = _bfilt[0], setBfilt = _bfilt[1];
+  var _bform = useState({clientName:"",clientEmail:"",clientAddress:"",dueDate:"",notes:""});
+  var bform = _bform[0], setBform = _bform[1];
+  var _blines = useState([{invId:"",name:"",qty:1,unit:"pcs",price:0}]);
+  var blines = _blines[0], setBlines = _blines[1];
+
+  var _addTab = useState("manual");    var addTab = _addTab[0], setAddTab = _addTab[1];
+  var _uploadRows = useState(null);    var uploadRows = _uploadRows[0], setUploadRows = _uploadRows[1];
+  var _uploadErr = useState("");       var uploadErr = _uploadErr[0], setUploadErr = _uploadErr[1];
+  var _drag = useState(false);         var drag = _drag[0], setDrag = _drag[1];
+  var _uploading = useState(false);    var uploading = _uploading[0], setUploading = _uploading[1];
+  var _editItem = useState(null);      var editItem = _editItem[0], setEditItem = _editItem[1];
+  var _movements = useState([]);       var movements = _movements[0], setMovements = _movements[1];
+  var _pos = useState([]);             var pos = _pos[0], setPos = _pos[1];
+  var _poView = useState("list");      var poView = _poView[0], setPoView = _poView[1];
+  var _activePo = useState(null);      var activePo = _activePo[0], setActivePo = _activePo[1];
+  var _poForm = useState({supplier:"",notes:"",expectedDate:""});
+  var poForm = _poForm[0], setPoForm = _poForm[1];
+  var _poLines = useState([{itemName:"",qty:1,unit:"pcs",cost:0}]);
+  var poLines = _poLines[0], setPoLines = _poLines[1];
+  var npo = useRef(2001);
+  var _scanOpen = useState(false);     var scanOpen = _scanOpen[0], setScanOpen = _scanOpen[1];
+  var _scanResult = useState("");      var scanResult = _scanResult[0], setScanResult = _scanResult[1];
+  var _locFilter = useState("all");    var locFilter = _locFilter[0], setLocFilter = _locFilter[1];
+  var _histFilter = useState("all");   var histFilter = _histFilter[0], setHistFilter = _histFilter[1];
+  var videoRef = useRef(null);
+  var scannerRef = useRef(null);
+
+  var nid = useRef(11);
+  var nbill = useRef(1001);
+  var chatEnd = useRef(null);
+  var fileRef = useRef(null);
+  var saveT = useRef(null);
+  var iR = useRef(inv);
+  var mR = useRef(mem);
+  var bR = useRef(bills);
+  var aiOnR = useRef(aiOn);
+  iR.current = inv; mR.current = mem; bR.current = bills; aiOnR.current = aiOn;
+
+  function showToast(m, type) {
+    if (!type) type = "ok";
+    setToast({m:m, type:type});
+    setTimeout(function() { setToast(null); }, 3000);
+  }
+
+  function addLog(m, type) {
+    if (!type) type = "info";
+    setLog(function(l) { return [{id:uid(),m:m,type:type,t:getNow()}].concat(l).slice(0,40); });
+  }
+
+  function logMovement(itemId, itemName, type, qty, balance, reason, ref) {
+    var mv = {id:uid(), date:new Date().toLocaleString("en-IN"), itemId:itemId, itemName:itemName, type:type, qty:qty, balance:balance, reason:reason, ref:ref||""};
+    setMovements(function(p){ return [mv].concat(p).slice(0,200); });
+  }
+
+  function sendLowStockEmail(item) {
+    var subject = "Low Stock Alert: "+item.name;
+    var body = "Dear "+item.supplier+",\n\nThis is an automated alert from FORGE Inventory System.\n\nItem: "+item.name+"\nCurrent Stock: "+item.qty+" "+item.unit+"\nReorder Level: "+item.reorder+" "+item.unit+"\nLocation: "+(item.location||"Main Warehouse")+"\n\nPlease arrange supply at the earliest.\n\nRegards,\nFORGE Inventory System";
+    window.open("mailto:?subject="+encodeURIComponent(subject)+"&body="+encodeURIComponent(body));
+  }
+
+  function requestBrowserNotification(title, body) {
+    if ("Notification" in window) {
+      if (Notification.permission === "granted") {
+        new Notification(title, {body:body, icon:""});
+      } else if (Notification.permission !== "denied") {
+        Notification.requestPermission().then(function(p){ if(p==="granted") new Notification(title,{body:body}); });
+      }
+    }
+  }
+
+  // LOAD
+  useEffect(function() {
+    addLog("Loading saved data…", "scan");
+    Promise.all([sl(SK.inv), sl(SK.bills), sl(SK.mem), sl(SK.meta)]).then(function(results) {
+      var sI = results[0], sB = results[1], sM = results[2], sMeta = results[3];
+      var restored = false;
+      if (sI && sI.length) {
+        setInv(sI);
+        var maxId = 10;
+        sI.forEach(function(i){ if((i.id||0)>maxId) maxId=i.id; });
+        nid.current = maxId + 1;
+        restored = true;
+      }
+      if (sB && sB.length) {
+        setBills(sB);
+        var maxBill = 1000;
+        sB.forEach(function(b){ var n=parseInt((b.id||"").replace("INV-","")||0); if(n>maxBill)maxBill=n; });
+        nbill.current = maxBill + 1;
+        restored = true;
+      }
+      if (sM && sM.length) { setMem(sM); restored = true; }
+      if (sMeta && sMeta.savedAt) setSavedAt(sMeta.savedAt);
+      if (restored) { addLog("✓ Session restored", "ok"); showToast("💾 Session restored!"); }
+      else addLog("✓ Demo inventory loaded", "ok");
+    }).catch(function() { addLog("Using defaults", "error"); }).then(function() { setLoaded(true); });
+  }, []);
+
+  // AUTOSAVE
+  function triggerSave(ni, nb, nm) {
+    if (!loaded) return;
+    clearTimeout(saveT.current);
+    saveT.current = setTimeout(function() {
+      setSaving(true);
+      var t = getNow();
+      Promise.all([
+        ss(SK.inv, ni !== null && ni !== undefined ? ni : iR.current),
+        ss(SK.bills, nb !== null && nb !== undefined ? nb : bR.current),
+        ss(SK.mem, nm !== null && nm !== undefined ? nm : mR.current),
+        ss(SK.meta, {savedAt:t})
+      ]).then(function() {
+        setSavedAt(t);
+        setSaving(false);
+      }).catch(function() { setSaving(false); });
+    }, 800);
+  }
+  useEffect(function() { if(loaded) triggerSave(inv, null, null); }, [inv, loaded]);
+  useEffect(function() { if(loaded) triggerSave(null, bills, null); }, [bills, loaded]);
+  useEffect(function() { if(loaded) triggerSave(null, null, mem); }, [mem, loaded]);
+
+  // NET CHECK
+  function checkNet() {
+    var apiKey = getApiKey();
+    if (!apiKey) { setAiOn(false); setNetChk(false); return; }
+    setNetChk(true);
+    var ctrl = new AbortController();
+    var timer = setTimeout(function(){ ctrl.abort(); }, 3500);
+    fetch("https://api.anthropic.com/v1/messages", {
+      method:"POST", headers:{"Content-Type":"application/json","x-api-key":apiKey,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
+      body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:5,messages:[{role:"user",content:"hi"}]}),
+      signal:ctrl.signal
+    }).then(function(r) {
+      clearTimeout(timer);
+      setAiOn(r.status < 500);
+      setNetChk(false);
+    }).catch(function() { clearTimeout(timer); setAiOn(false); setNetChk(false); });
+  }
+
+  useEffect(function() {
+    checkNet();
+    window.addEventListener("online", checkNet);
+    window.addEventListener("offline", function(){ setAiOn(false); });
+    var ni = setInterval(checkNet, 30000);
+    return function() { window.removeEventListener("online", checkNet); clearInterval(ni); };
+  }, []);
+
+  // SCAN
+  function runScan() {
+    setBusy(true);
+    addLog(aiOnR.current ? "🌐 AI scan…" : "⬡ Offline scan…", "scan");
+    if (aiOnR.current) {
+      callAI("FORGE alert brain. Return ONLY JSON array max 4:{id,sev,item,msg,act}. [] if none.", "INV:\n"+makeSnap(iR.current, mR.current), true)
+        .then(function(ar) {
+          if (ar && ar.length) {
+            setAlts(function(p) {
+              var ex = {};
+              p.forEach(function(a){ ex[a.item]=true; });
+              var newAlerts = ar.filter(function(a){ return !ex[a.item]; }).map(function(a){ return Object.assign({},a,{id:uid(),t:getNow()}); });
+              if (newAlerts.length) addLog("🚨 "+newAlerts.length+" AI alert(s)", "alert");
+              return newAlerts.concat(p).slice(0,10);
+            });
+          } else { addLog("✓ AI: All clear","ok"); }
+          return callAI("FORGE ordering brain. ONLY JSON array 2-4:{id,item,urgency,qty,unit,reason,cost,supplier,delivery}", "INV:\n"+makeSnap(iR.current,mR.current), true);
+        })
+        .then(function(sr) {
+          if (sr && sr.length) {
+            setSugg(sr.map(function(s){ return Object.assign({},s,{id:uid()}); }));
+            addLog("💡 "+sr.length+" AI suggestions","ok");
+          }
+          setBusy(false); setCountdown(7200);
+          addLog("✓ Scan done [AI]","ok");
+        })
+        .catch(function() {
+          setAiOn(false);
+          var ar = oAlerts(iR.current);
+          setAlts(function(p){ var ex={}; p.forEach(function(a){ex[a.item]=true;}); return ar.filter(function(a){return !ex[a.item];}).concat(p).slice(0,10); });
+          setSugg(oSugg(iR.current));
+          addLog("⚠ AI error — offline mode","error");
+          setBusy(false); setCountdown(7200);
+        });
+    } else {
+      setTimeout(function() {
+        var ar = oAlerts(iR.current);
+        if (ar.length) addLog("🚨 "+ar.length+" alert(s)","alert"); else addLog("✓ All clear","ok");
+        setAlts(function(p){ var ex={}; p.forEach(function(a){ex[a.item]=true;}); return ar.filter(function(a){return !ex[a.item];}).concat(p).slice(0,10); });
+        var sr = oSugg(iR.current);
+        setSugg(sr);
+        if (sr.length) addLog("💡 "+sr.length+" suggestions","ok");
+        setBusy(false); setCountdown(7200);
+        addLog("✓ Scan done [offline]","ok");
+      }, 300);
+    }
+  }
+
+  function genBrief() {
+    addLog("📋 Generating briefing…","scan");
+    var d = new Date().toLocaleDateString("en-US",{weekday:"long",month:"long",day:"numeric"});
+    function makeOfflineBrief() {
+      var cr = iR.current.filter(function(i){return getStatus(i)==="critical";});
+      var lw = iR.current.filter(function(i){return getStatus(i)==="low";});
+      var tv = iR.current.reduce(function(a,i){return a+i.qty*i.cost;},0);
+      var txt = "SITUATION: Monitoring "+iR.current.length+" items, value "+fmt(tv)+". "+(cr.length?cr.length+" critical.":"All stable.")+"\n\nURGENT:\n"+(cr.length?cr.map(function(i){return "• "+i.name+" — "+i.qty+" "+i.unit+", "+getDays(i)+"d left";}).join("\n"):"• None")+"\n\nTHIS WEEK:\n"+(lw.length?lw.map(function(i){return "• "+i.name+" — order "+getSugQty(i)+" "+i.unit;}).join("\n"):"• No urgent orders")+"\n\nRECOMMENDATION: "+(cr.length?"Order "+cr[0].name+" immediately.":lw.length?"Prioritize "+lw[0].name+".":"All levels healthy.");
+      addLog("📋 Offline briefing","ok");
+      setBrief({text:txt, t:getNow(), date:d, mode:"offline"});
+      setBriefOpen(true);
+    }
+    if (aiOnR.current) {
+      callAI("FORGE daily briefing. Sections: SITUATION, URGENT, THIS WEEK, WATCH LIST, RECOMMENDATION. Bullet points. Concise.", "Inv:\n"+makeSnap(iR.current,mR.current), false)
+        .then(function(txt) {
+          addLog("📋 AI briefing ready","ok");
+          setBrief({text:txt, t:getNow(), date:d, mode:"AI"});
+          setBriefOpen(true);
+        })
+        .catch(function() { makeOfflineBrief(); });
+    } else { makeOfflineBrief(); }
+  }
+
+  useEffect(function() {
+    if (!loaded) return;
+    var t1 = setTimeout(genBrief, 1200);
+    var t2 = setTimeout(runScan, 2500);
+    var cd = setInterval(function() {
+      setCountdown(function(c) {
+        if (c <= 1) { runScan(); return 7200; }
+        return c - 1;
+      });
+    }, 1000);
+    return function() { clearTimeout(t1); clearTimeout(t2); clearInterval(cd); };
+  }, [loaded]);
+
+  useEffect(function() {
+    if (chatEnd.current) chatEnd.current.scrollIntoView({behavior:"smooth"});
+  }, [msgs, chatBusy]);
+
+  // CHAT
+  function send(txt) {
+    var msg = txt || cin.trim();
+    if (!msg || chatBusy) return;
+    setCin("");
+    setMsgs(function(m){ return m.concat([{r:"user",c:msg}]); });
+    setChatBusy(true);
+    if (aiOnR.current) {
+      callAI("FORGE inventory brain.\nInv:\n"+makeSnap(iR.current,mR.current)+"\nBills:"+bR.current.length+"\nUse **bold**, bullet points.", msg, false)
+        .then(function(r) {
+          setMsgs(function(m){ return m.concat([{r:"ai",c:r,mode:"ai"}]); });
+          setChatBusy(false);
+        })
+        .catch(function() {
+          setAiOn(false);
+          var r = oChat(msg, iR.current, mR.current, bR.current);
+          setMsgs(function(m){ return m.concat([{r:"ai",c:r,mode:"off"}]); });
+          setChatBusy(false);
+        });
+    } else {
+      setTimeout(function() {
+        var r = oChat(msg, iR.current, mR.current, bR.current);
+        setMsgs(function(m){ return m.concat([{r:"ai",c:r,mode:"off"}]); });
+        setChatBusy(false);
+      }, 200 + Math.random()*250);
+    }
+  }
+
+  function accept(s) {
+    setMem(function(m){ return m.concat(["ACC "+s.qty+s.unit+" "+s.item]); });
+    setSugg(function(p){ return p.filter(function(x){ return x.id !== s.id; }); });
+    setInv(function(v){ return v.map(function(i){ return i.name===s.item ? Object.assign({},i,{qty:i.qty+s.qty}) : i; }); });
+    showToast("✓ "+s.item+" ordered!");
+    addLog("✓ Accepted: "+s.item,"ok");
+  }
+  function dismiss(s) {
+    setMem(function(m){ return m.concat(["DIS "+s.item]); });
+    setSugg(function(p){ return p.filter(function(x){ return x.id !== s.id; }); });
+    showToast("Noted","warn");
+  }
+
+  // ADD
+  function valForm() {
+    var e = {};
+    if (!mf.name.trim()) e.name = "Required";
+    if (!mf.supplier.trim()) e.supplier = "Required";
+    if (N(mf.cost) <= 0) e.cost = ">0";
+    if (N(mf.lead,1) < 1) e.lead = "≥1";
+    setMErr(e);
+    return Object.keys(e).length === 0;
+  }
+  function submitAdd() {
+    if (!valForm()) return;
+    var item = {id:nid.current++, name:mf.name.trim(), qty:N(mf.qty), unit:mf.unit||"pcs", reorder:N(mf.reorder), usage:N(mf.usage), lead:N(mf.lead,1), supplier:mf.supplier.trim(), cost:N(mf.cost), location:mf.location||"Main Warehouse"};
+    setInv(function(v){ return [item].concat(v); });
+    logMovement(item.id, item.name, "IN", N(mf.qty), N(mf.qty), "Manual Add", "");
+    setMf({name:"",qty:"",unit:"pcs",reorder:"",usage:"",lead:"",supplier:"",cost:"",location:"Main Warehouse"});
+    setMErr({});
+    showToast("✓ Added!");
+    addLog("➕ "+item.name,"ok");
+  }
+
+  // FILE UPLOAD PARSER
+  var COL_MAP = {
+    name:        ["name","item","product","description","itemname","item name"],
+    qty:         ["qty","quantity","stock","currentstock","current stock","amount","onhand","on hand"],
+    unit:        ["unit","units","uom"],
+    reorder:     ["reorder","reorderlevel","reorder level","reorderpoint","reorder point","minstock","min stock","minimum"],
+    usage:       ["usage","dailyusage","daily usage","dailyuse","consumption","demand","perday","per day"],
+    lead:        ["lead","leadtime","lead time","leadtimedays","lead time days","days","deliverydays","delivery days"],
+    supplier:    ["supplier","vendor","manufacturer","source","supplierName","supplier name"],
+    cost:        ["cost","costperunit","cost per unit","price","unitprice","unit price","unitcost","unit cost","rate"]
+  };
+
+  function normalizeHeader(h) {
+    return String(h||"").toLowerCase().replace(/[^a-z0-9]/g,"");
+  }
+
+  function mapHeaders(headers) {
+    var map = {};
+    headers.forEach(function(h, idx) {
+      var norm = normalizeHeader(h);
+      Object.keys(COL_MAP).forEach(function(field) {
+        if (map[field] !== undefined) return;
+        COL_MAP[field].forEach(function(alias) {
+          if (normalizeHeader(alias) === norm) map[field] = idx;
+        });
+      });
+    });
+    return map;
+  }
+
+  function rowsToItems(headers, rows) {
+    var map = mapHeaders(headers);
+    if (map.name === undefined) return null;
+    return rows.map(function(row) {
+      return {
+        name:     String(row[map.name]||"").trim(),
+        qty:      N(row[map.qty !== undefined ? map.qty : -1]),
+        unit:     String(row[map.unit !== undefined ? map.unit : -1]||"pcs").trim()||"pcs",
+        reorder:  N(row[map.reorder !== undefined ? map.reorder : -1]),
+        usage:    N(row[map.usage !== undefined ? map.usage : -1]),
+        lead:     N(row[map.lead !== undefined ? map.lead : -1],1)||1,
+        supplier: String(row[map.supplier !== undefined ? map.supplier : -1]||"").trim(),
+        cost:     N(row[map.cost !== undefined ? map.cost : -1])
+      };
+    }).filter(function(i){ return i.name.length > 0; });
+  }
+
+  function parseFile(file) {
+    setUploading(true);
+    setUploadErr("");
+    setUploadRows(null);
+    var name = file.name.toLowerCase();
+    var isExcel = name.endsWith(".xlsx") || name.endsWith(".xls") || name.endsWith(".ods");
+    var isCSV   = name.endsWith(".csv") || name.endsWith(".tsv") || name.endsWith(".txt");
+
+    if (!isExcel && !isCSV) {
+      setUploadErr("Unsupported file type. Please use .xlsx, .xls, .csv or .tsv");
+      setUploading(false);
+      return;
+    }
+
+    var reader = new FileReader();
+
+    if (isExcel) {
+      reader.onload = function(e) {
+        try {
+          var data = new Uint8Array(e.target.result);
+          var wb = XLSX.read(data, {type:"array"});
+          var ws = wb.Sheets[wb.SheetNames[0]];
+          var raw = XLSX.utils.sheet_to_json(ws, {header:1, defval:""});
+          if (raw.length < 2) { setUploadErr("File is empty or has no data rows."); setUploading(false); return; }
+          var headers = raw[0].map(function(h){ return String(h||""); });
+          var rows = raw.slice(1).filter(function(r){ return r.some(function(c){ return String(c||"").trim(); }); });
+          var items = rowsToItems(headers, rows);
+          if (!items || !items.length) { setUploadErr("Could not find a 'name' column. Check your file has the right headers."); setUploading(false); return; }
+          setUploadRows({headers:headers, items:items, fileName:file.name});
+          setUploading(false);
+        } catch(ex) {
+          setUploadErr("Failed to read Excel file: "+ex.message);
+          setUploading(false);
+        }
+      };
+      reader.readAsArrayBuffer(file);
+    } else {
+      reader.onload = function(e) {
+        try {
+          var text = e.target.result;
+          var sep = text.indexOf("\t") >= 0 ? "\t" : ",";
+          var lines = text.trim().split(/\r?\n/).filter(function(l){return l.trim();});
+          if (lines.length < 2) { setUploadErr("File is empty or has no data rows."); setUploading(false); return; }
+          var headers = lines[0].split(sep).map(function(h){ return h.trim().replace(/^"|"$/g,""); });
+          var rows = lines.slice(1).map(function(line){
+            var cols = line.split(sep).map(function(c){ return c.trim().replace(/^"|"$/g,""); });
+            return cols;
+          });
+          var items = rowsToItems(headers, rows);
+          if (!items || !items.length) { setUploadErr("Could not find a 'name' column. Check your file has the right headers."); setUploading(false); return; }
+          setUploadRows({headers:headers, items:items, fileName:file.name});
+          setUploading(false);
+        } catch(ex) {
+          setUploadErr("Failed to read file: "+ex.message);
+          setUploading(false);
+        }
+      };
+      reader.readAsText(file);
+    }
+  }
+
+  function importUploadedRows() {
+    if (!uploadRows) return;
+    var added = 0, restocked = 0, updatedInv;
+
+    updatedInv = inv.slice();
+
+    uploadRows.items.forEach(function(incoming) {
+      var match = updatedInv.findIndex(function(existing) {
+        return existing.name.toLowerCase().trim() === incoming.name.toLowerCase().trim();
+      });
+
+      if (match >= 0) {
+        // ── EXISTING ITEM → restock (add qty) and update any changed fields
+        var old = updatedInv[match];
+        updatedInv[match] = Object.assign({}, old, {
+          qty:      old.qty + (incoming.qty || 0),
+          reorder:  incoming.reorder  || old.reorder,
+          usage:    incoming.usage    || old.usage,
+          lead:     incoming.lead     || old.lead,
+          supplier: incoming.supplier || old.supplier,
+          cost:     incoming.cost     || old.cost,
+          unit:     incoming.unit     || old.unit
+        });
+        addLog("🔄 Restocked "+incoming.name+" +"+incoming.qty+" → now "+updatedInv[match].qty, "ok");
+        logMovement(old.id, incoming.name, "IN", incoming.qty, updatedInv[match].qty, "Excel Import", uploadRows.fileName);
+        restocked++;
+      } else {
+        // ── NEW ITEM → add fresh
+        updatedInv.push(Object.assign({}, incoming, {id: nid.current++}));
+        addLog("➕ New item added: "+incoming.name+" ("+incoming.qty+")", "ok");
+        added++;
+      }
+    });
+
+    setInv(updatedInv);
+    var msg = [];
+    if (restocked) msg.push(restocked+" restocked");
+    if (added) msg.push(added+" new items");
+    showToast("✓ "+msg.join(" · ")+" from "+uploadRows.fileName);
+    addLog("📥 Import done — "+msg.join(", "), "ok");
+    setUploadRows(null);
+    setAddTab("manual");
+  }
+
+  // BILLING
+  function calcTotals(lines) {
+    var sub = lines.reduce(function(a,l){ return a + N(l.qty)*N(l.price); }, 0);
+    return {sub:sub, tax:sub*TAX, total:sub*(1+TAX)};
+  }
+  function createInvoice() {
+    if (!bform.clientName.trim()) { showToast("Client required","error"); return; }
+    var vld = blines.filter(function(l){ return l.name.trim() && N(l.qty)>0 && N(l.price)>0; });
+    if (!vld.length) { showToast("Add line items","error"); return; }
+
+    // ── STOCK DEDUCTION & AUTO-ADD ──
+    var newInv = inv.slice();
+    var deductLogs = [];
+    var warnings = [];
+
+    vld.forEach(function(line) {
+      var billedQty = N(line.qty);
+
+      if (line.invId) {
+        // Linked to existing inventory item — deduct stock
+        newInv = newInv.map(function(item) {
+          if (String(item.id) === String(line.invId)) {
+            var newQty = Math.max(0, item.qty - billedQty);
+            deductLogs.push("📦 -"+billedQty+" "+item.name);
+            if (newQty <= 0) warnings.push(item.name+" is now OUT OF STOCK!");
+            else if (newQty < item.reorder) warnings.push(item.name+" below reorder level ("+newQty+" left)");
+            return Object.assign({}, item, {qty: newQty});
+          }
+          return item;
+        });
+      } else if (line.name.trim()) {
+        // New product not in inventory — auto-add it with qty 0 (just billed out)
+        var exists = newInv.find(function(i){ return i.name.toLowerCase()===line.name.trim().toLowerCase(); });
+        if (!exists) {
+          var newItem = {
+            id: nid.current++,
+            name: line.name.trim(),
+            qty: 0,
+            reorder: 10,
+            usage: 1,
+            lead: 7,
+            supplier: "—",
+            cost: N(line.price),
+            unit: line.unit || "pcs"
+          };
+          newInv.push(newItem);
+          deductLogs.push("➕ "+line.name+" added to inventory");
+          warnings.push(line.name+" auto-added to inventory with 0 stock — set reorder level!");
+        } else {
+          // Exists by name but no invId — deduct anyway
+          newInv = newInv.map(function(item) {
+            if (item.name.toLowerCase()===line.name.trim().toLowerCase()) {
+              var newQty = Math.max(0, item.qty - billedQty);
+              deductLogs.push("📦 -"+billedQty+" "+item.name);
+              if (newQty <= 0) warnings.push(item.name+" is now OUT OF STOCK!");
+              else if (newQty < item.reorder) warnings.push(item.name+" below reorder level ("+newQty+" left)");
+              return Object.assign({}, item, {qty: newQty});
+            }
+            return item;
+          });
+        }
+      }
+    });
+
+    // Apply inventory update
+    setInv(newInv);
+
+    // Log movements + notifications
+    vld.forEach(function(line) {
+      var billedQty = N(line.qty);
+      var matched = newInv.find(function(i){ return String(i.id)===String(line.invId) || i.name.toLowerCase()===line.name.trim().toLowerCase(); });
+      if (matched) {
+        logMovement(matched.id, matched.name, "OUT", billedQty, matched.qty, "Billed", "INV-"+(nbill.current));
+        if (matched.qty <= 0 || matched.qty < matched.reorder) {
+          requestBrowserNotification("⚠ Low Stock: "+matched.name, matched.qty+" "+matched.unit+" remaining — below reorder level");
+        }
+      }
+    });
+
+    // Log each deduction
+    deductLogs.forEach(function(l){ addLog(l, "ok"); });
+
+    // Show warnings
+    if (warnings.length) {
+      warnings.forEach(function(w){ addLog("⚠ "+w, "alert"); });
+      showToast("⚠ Stock updated — check alerts!", "warn");
+    }
+
+    var totals = calcTotals(vld);
+    var bill = Object.assign({}, bform, {
+      id:"INV-"+nbill.current++,
+      date:new Date().toLocaleDateString("en-US",{year:"numeric",month:"short",day:"numeric"}),
+      lines:vld, sub:totals.sub, tax:totals.tax, total:totals.total, status:"draft"
+    });
+    setBills(function(p){ return [bill].concat(p); });
+    setBform({clientName:"",clientEmail:"",clientAddress:"",dueDate:"",notes:""});
+    setBlines([{invId:"",name:"",qty:1,unit:"pcs",price:0}]);
+    setBillingView("list");
+    if (!warnings.length) showToast("✓ "+bill.id+" created — stock updated!");
+    addLog("🧾 "+bill.id+" · stock auto-deducted","ok");
+  }
+  function setBS(id, s) {
+    setBills(function(p){ return p.map(function(b){ return b.id===id ? Object.assign({},b,{status:s}) : b; }); });
+    showToast("→ "+s);
+  }
+
+  // PURCHASE ORDERS
+  function createPO() {
+    if (!poForm.supplier.trim()) { showToast("Supplier required","error"); return; }
+    var vld = poLines.filter(function(l){ return l.itemName.trim() && N(l.qty)>0; });
+    if (!vld.length) { showToast("Add line items","error"); return; }
+    var total = vld.reduce(function(a,l){ return a+N(l.qty)*N(l.cost); }, 0);
+    var po = {
+      id:"PO-"+npo.current++,
+      supplier: poForm.supplier.trim(),
+      notes: poForm.notes,
+      expectedDate: poForm.expectedDate,
+      date: new Date().toLocaleDateString("en-IN",{year:"numeric",month:"short",day:"numeric"}),
+      lines: vld, total: total, status:"draft"
+    };
+    setPos(function(p){ return [po].concat(p); });
+    setPoForm({supplier:"",notes:"",expectedDate:""});
+    setPoLines([{itemName:"",qty:1,unit:"pcs",cost:0}]);
+    setPoView("list");
+    showToast("✓ "+po.id+" created!");
+    addLog("📋 PO "+po.id+" → "+po.supplier,"ok");
+  }
+
+  function receivePO(po) {
+    // Mark PO as received and increase inventory
+    var updatedInv = inv.slice();
+    po.lines.forEach(function(line) {
+      var match = updatedInv.findIndex(function(i){ return i.name.toLowerCase()===line.itemName.toLowerCase(); });
+      if (match >= 0) {
+        var newQty = updatedInv[match].qty + N(line.qty);
+        logMovement(updatedInv[match].id, updatedInv[match].name, "IN", N(line.qty), newQty, "PO Received", po.id);
+        updatedInv[match] = Object.assign({}, updatedInv[match], {qty: newQty});
+        addLog("📦 +"+line.qty+" "+line.itemName+" via "+po.id,"ok");
+      } else {
+        // New item from PO
+        var newItem = {id:nid.current++, name:line.itemName.trim(), qty:N(line.qty), unit:line.unit||"pcs", reorder:10, usage:1, lead:7, supplier:po.supplier, cost:N(line.cost), location:"Main Warehouse"};
+        updatedInv.push(newItem);
+        logMovement(newItem.id, newItem.name, "IN", N(line.qty), N(line.qty), "PO Received (New Item)", po.id);
+        addLog("➕ New item "+line.itemName+" received via "+po.id,"ok");
+      }
+    });
+    setInv(updatedInv);
+    setPos(function(p){ return p.map(function(o){ return o.id===po.id ? Object.assign({},o,{status:"received",receivedDate:new Date().toLocaleDateString("en-IN",{year:"numeric",month:"short",day:"numeric"})}) : o; }); });
+    showToast("✓ "+po.id+" received — stock updated!");
+    requestBrowserNotification("PO Received: "+po.id, po.lines.length+" items added to inventory");
+  }
+
+  // BARCODE SCANNER
+  function startScanner() {
+    setScanOpen(true);
+    setScanResult("");
+    setTimeout(function() {
+      try {
+        var hints = new Map();
+        var codeReader = new ZXing.BrowserMultiFormatReader(hints);
+        scannerRef.current = codeReader;
+        codeReader.listVideoInputDevices().then(function(devices) {
+          var deviceId = devices.length > 0 ? devices[devices.length-1].deviceId : undefined;
+          codeReader.decodeFromVideoDevice(deviceId, videoRef.current, function(result, err) {
+            if (result) {
+              var code = result.getText();
+              setScanResult(code);
+              // Try to find item by barcode/name match
+              var found = inv.find(function(i){ return i.barcode===code || i.name.toLowerCase().includes(code.toLowerCase()); });
+              if (found) {
+                setMf(function(p){ return Object.assign({},p,{name:found.name,unit:found.unit,cost:found.cost,supplier:found.supplier}); });
+                showToast("✓ Found: "+found.name);
+              } else {
+                setMf(function(p){ return Object.assign({},p,{name:code}); });
+                showToast("Barcode: "+code+" — fill in details","warn");
+              }
+              stopScanner();
+              setView("add");
+            }
+          });
+        });
+      } catch(e) {
+        showToast("Camera not available","error");
+        setScanOpen(false);
+      }
+    }, 300);
+  }
+
+  function stopScanner() {
+    if (scannerRef.current) {
+      try { scannerRef.current.reset(); } catch(e) {}
+      scannerRef.current = null;
+    }
+    setScanOpen(false);
+  }
+  function delBill(id) {
+    setBills(function(p){ return p.filter(function(b){ return b.id !== id; }); });
+    if (activeBill && activeBill.id === id) { setActiveBill(null); setBillingView("list"); }
+    showToast("Deleted","warn");
+  }
+  function resetAll() {
+    Promise.all([sd(SK.inv),sd(SK.bills),sd(SK.mem),sd(SK.meta)]).then(function() {
+      setInv(SEED); setBills([]); setMem([]); setAlts([]); setSugg([]);
+      nid.current=11; nbill.current=1001; setSavedAt(null); setSettings(false);
+      showToast("Reset","warn");
+    });
+  }
+
+  // PRINT
+  function printBill(bill) {
+    var linesHTML = bill.lines.map(function(l) {
+      return '<tr><td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;color:#111">' + l.name + '</td><td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;text-align:center;color:#374151">' + l.qty + ' ' + l.unit + '</td><td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;text-align:right;color:#374151">₹' + Number(l.price).toFixed(2) + '</td><td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;text-align:right;font-weight:700;color:#111">₹' + (N(l.qty)*N(l.price)).toFixed(2) + '</td></tr>';
+    }).join("");
+    var statusColor = {draft:"#d97706",issued:"#2563eb",paid:"#059669",overdue:"#dc2626"}[bill.status] || "#666";
+    var html = '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Invoice ' + bill.id + '</title><style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:Inter,Segoe UI,system-ui,sans-serif;-webkit-font-smoothing:antialiased;background:#fff;color:#111;padding:40px}@media print{body{padding:20px}}.header{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:36px;padding-bottom:24px;border-bottom:3px solid #111}.logo-area{display:flex;align-items:center;gap:12px}.logo-hex{width:48px;height:48px}.brand{font-size:28px;font-weight:900;letter-spacing:6px;color:#111;font-family:Space Grotesk,sans-serif}.brand-sub{font-size:9px;letter-spacing:3px;color:#666;margin-top:2px}.inv-meta{text-align:right}.inv-id{font-size:22px;font-weight:900;color:#111;letter-spacing:2px}.inv-date{font-size:12px;color:#666;margin-top:4px}.status-badge{display:inline-block;padding:3px 10px;border-radius:4px;font-size:10px;font-weight:700;letter-spacing:1px;background:' + statusColor + '22;color:' + statusColor + ';border:1px solid ' + statusColor + ';margin-top:6px;text-transform:uppercase}.parties{display:grid;grid-template-columns:1fr 1fr;gap:40px;margin-bottom:32px}.party-label{font-size:9px;letter-spacing:3px;color:#999;text-transform:uppercase;margin-bottom:8px}.party-name{font-size:16px;font-weight:700;color:#111;margin-bottom:4px}.party-detail{font-size:13px;color:#555;line-height:1.6}table{width:100%;border-collapse:collapse;margin-bottom:24px}thead tr{background:#111}thead th{padding:10px 12px;text-align:left;color:#fff;font-size:11px;letter-spacing:1px;text-transform:uppercase;font-weight:600}thead th:last-child,thead th:nth-child(3){text-align:right}thead th:nth-child(2){text-align:center}.totals{display:flex;flex-direction:column;align-items:flex-end;gap:8px;padding-top:16px;border-top:1px solid #e5e7eb}.total-row{display:flex;justify-content:flex-end;gap:60px;font-size:13px;color:#555}.total-row span:last-child{min-width:90px;text-align:right;color:#111}.total-final{display:flex;justify-content:flex-end;gap:60px;font-size:18px;font-weight:900;color:#111;padding-top:12px;border-top:3px solid #111;margin-top:4px}.total-final span:last-child{min-width:90px;text-align:right}.footer{margin-top:48px;padding-top:20px;border-top:1px solid #e5e7eb;display:flex;justify-content:space-between;align-items:center;font-size:11px;color:#999}.footer strong{color:#111;letter-spacing:2px}.notes-box{background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px;padding:14px 16px;margin-bottom:24px;font-size:13px;color:#555;line-height:1.6}@media print{button{display:none!important}}</style></head><body>';
+    html += '<div class="header"><div class="logo-area"><svg class="logo-hex" viewBox="0 0 80 80"><defs><linearGradient id="G" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#0ea5e9"/><stop offset="50%" stop-color="#818cf8"/><stop offset="100%" stop-color="#10b981"/></linearGradient></defs><polygon points="40,4 70,21 70,59 40,76 10,59 10,21" fill="none" stroke="url(#G)" stroke-width="3"/><polygon points="40,18 60,29 60,51 40,62 20,51 20,29" fill="rgba(14,165,233,.06)" stroke="url(#G)" stroke-width="1.5"/><circle cx="40" cy="40" r="9" fill="none" stroke="url(#G)" stroke-width="2"/><circle cx="40" cy="40" r="3.5" fill="#0ea5e9"/></svg><div><div class="brand">FORGE</div><div class="brand-sub">AUTONOMOUS INVENTORY BRAIN</div><div style="font-size:9px;color:#818cf8;font-style:italic;margin-top:2px;letter-spacing:.5px">by Arpan Dixit</div></div></div><div class="inv-meta"><div class="inv-id">' + bill.id + '</div><div class="inv-date">Issued: ' + bill.date + '</div>' + (bill.dueDate ? '<div class="inv-date">Due: ' + bill.dueDate + '</div>' : '') + '<div><span class="status-badge">' + bill.status + '</span></div></div></div>';
+    html += '<div class="parties"><div><div class="party-label">From</div><div class="party-name">FORGE Systems</div><div class="party-detail">Inventory Management<br/>arpan@forge.system</div></div><div><div class="party-label">Bill To</div><div class="party-name">' + bill.clientName + '</div><div class="party-detail">' + (bill.clientEmail ? bill.clientEmail + '<br/>' : '') + (bill.clientAddress || '') + '</div></div></div>';
+    if (bill.notes) html += '<div class="notes-box"><strong>Notes:</strong> ' + bill.notes + '</div>';
+    html += '<table><thead><tr><th>Description</th><th style="text-align:center">Qty</th><th style="text-align:right">Unit Price</th><th style="text-align:right">Total</th></tr></thead><tbody>' + linesHTML + '</tbody></table>';
+    html += '<div class="totals"><div class="total-row"><span>Subtotal</span><span>' + fmt(bill.sub) + '</span></div><div class="total-row"><span>Tax (8%)</span><span>' + fmt(bill.tax) + '</span></div><div class="total-final"><span>TOTAL DUE</span><span>' + fmt(bill.total) + '</span></div></div>';
+    html += '<div class="footer"><div><strong>FORGE</strong> · Autonomous Inventory Brain</div><div>Generated ' + new Date().toLocaleDateString("en-US",{year:"numeric",month:"long",day:"numeric"}) + '</div></div>';
+    html += '<div style="text-align:center;margin-top:24px"><button onclick="window.print();window.close();" style="padding:10px 28px;background:#111;color:#fff;border:none;border-radius:6px;font-size:13px;font-weight:700;cursor:pointer;letter-spacing:1px;font-family:Inter,sans-serif">🖨 PRINT</button>&nbsp;&nbsp;<button onclick="window.close();" style="padding:10px 20px;background:#f3f4f6;color:#374151;border:1px solid #d1d5db;border-radius:6px;font-size:13px;cursor:pointer;font-family:Inter,sans-serif">Close</button></div>';
+    html += '</body></html>';
+    var w = window.open("", "_blank", "width=860,height=1000");
+    w.document.write(html);
+    w.document.close();
+  }
+
+  // DERIVED
+  var crits = inv.filter(function(i){ return getStatus(i)==="critical"; }).length;
+  var lows = inv.filter(function(i){ return getStatus(i)==="low"; }).length;
+  var tv = inv.reduce(function(a,i){ return a+i.qty*i.cost; }, 0);
+  var fInv = inv.filter(function(i){ return (filter==="all" || getStatus(i)===filter) && (locFilter==="all" || (i.location||"Main Warehouse")===locFilter); });
+  var fBills = bills.filter(function(b){ return bfilt==="all" || b.status===bfilt; });
+  var rev = bills.filter(function(b){return b.status==="paid";}).reduce(function(a,b){return a+b.total;},0);
+  var outstanding = bills.filter(function(b){return b.status==="draft"||b.status==="issued";}).reduce(function(a,b){return a+b.total;},0);
+  var ch = Math.floor(countdown/3600), cm = Math.floor((countdown%3600)/60), cs = countdown%60;
+  var cfmt = ch>0 ? (ch+"h "+cm+"m") : (cm+"m "+("0"+cs).slice(-2)+"s");
+  var qQ=N(mf.qty), qU=N(mf.usage), qL=N(mf.lead,1);
+  var previewOk = mf.name && qQ>0 && qU>0;
+  var TABS = [{v:"brain",l:"🧠 Brain"},{v:"chat",l:"💬 Chat"},{v:"dash",l:"📦 Stock"},{v:"add",l:"➕ Add"},{v:"bill",l:"🧾 Billing"},{v:"po",l:"📋 Purchase Orders"},{v:"history",l:"📈 History"}];
+
+  if (!loaded) return (
+    <div style={{minHeight:"100vh",background:"#020917",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",fontFamily:"'Inter','Segoe UI',system-ui,sans-serif",position:"relative",overflow:"hidden"}}>
+      <BG/>
+      <div style={{position:"relative",zIndex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:20}}>
+        <Logo sz={80}/>
+        <div style={{fontSize:40,fontWeight:800,background:"linear-gradient(90deg,#38bdf8,#818cf8,#34d399)",WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent",letterSpacing:10,fontFamily:"'Syne','Space Grotesk',sans-serif"}}>FORGE</div>
+        <div style={{fontSize:16,color:"#818cf8",letterSpacing:1,fontFamily:"'Space Grotesk',sans-serif",fontWeight:500,fontStyle:"italic",opacity:.9}}>by Arpan Dixit</div>
+        <div style={{color:"#38bdf8",fontSize:13,letterSpacing:3,fontFamily:"'Inter',sans-serif",marginTop:4}}>LOADING…</div>
+      </div>
+    </div>
+  );
+
+  var currentBill = activeBill ? (bills.find(function(b){return b.id===activeBill.id;}) || activeBill) : null;
+
+  return (
+    <div style={{minHeight:"100vh",background:"#020917",color:"#e2e8f0",fontFamily:"'Inter','Segoe UI',sans-serif",display:"flex",flexDirection:"column",fontSize:16,position:"relative",overflow:"hidden"}}>
+      <BG/>
+
+      {/* HEADER */}
+      <div style={{display:"flex",alignItems:"center",gap:8,padding:"12px 20px",background:"rgba(2,9,23,.96)",backdropFilter:"blur(16px)",borderBottom:"1px solid rgba(56,189,248,.1)",position:"sticky",top:0,zIndex:50,flexWrap:"wrap",flexShrink:0}}>
+        <div style={{display:"flex",alignItems:"center",gap:10,marginRight:"auto"}}>
+          <Logo sz={44} spin={busy}/>
+          <div>
+            <div style={{fontSize:30,fontWeight:800,background:"linear-gradient(90deg,#38bdf8,#818cf8,#34d399)",WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent",letterSpacing:8,fontFamily:"'Syne','Space Grotesk',sans-serif"}}>FORGE</div>
+            <div style={{fontSize:13,color:"#38bdf8",opacity:.7,letterSpacing:3.5,fontFamily:"'Inter',sans-serif",fontWeight:600,textTransform:"uppercase"}}>AUTONOMOUS INVENTORY BRAIN</div>
+            <div style={{fontSize:13,color:"#818cf8",opacity:.85,letterSpacing:.5,fontFamily:"'Space Grotesk',sans-serif",fontWeight:500,fontStyle:"italic",marginTop:2}}>by Arpan Dixit</div>
+            <div style={{fontSize:12,display:"flex",alignItems:"center",gap:4,marginTop:1}}>
+              {saving
+                ? <span style={{color:"#fbbf24",display:"flex",alignItems:"center",gap:3}}><span style={{width:5,height:5,borderRadius:"50%",background:"#fbbf24",display:"inline-block",animation:"blink .5s infinite"}}/>SAVING…</span>
+                : savedAt
+                  ? <span style={{color:"#34d399",display:"flex",alignItems:"center",gap:3}}><span style={{width:5,height:5,borderRadius:"50%",background:"#34d399",display:"inline-block"}}/>SAVED {savedAt}</span>
+                  : <span style={{color:"#4a5568"}}>next scan {cfmt}</span>
+              }
+            </div>
+          </div>
+        </div>
+        <div style={{display:"flex",gap:5,alignItems:"center",flexWrap:"wrap"}}>
+          {netChk
+            ? <span style={{padding:"2px 7px",borderRadius:3,fontSize:11,fontWeight:700,background:"rgba(251,191,36,.15)",color:"#fbbf24",border:"1px solid rgba(251,191,36,.3)"}}>CHECKING</span>
+            : aiOn
+              ? <span style={{padding:"2px 7px",borderRadius:3,fontSize:11,fontWeight:700,background:"rgba(52,211,153,.15)",color:"#34d399",border:"1px solid rgba(52,211,153,.3)"}}>● AI</span>
+              : <span style={{padding:"2px 7px",borderRadius:3,fontSize:11,fontWeight:700,background:"rgba(129,140,248,.15)",color:"#818cf8",border:"1px solid rgba(129,140,248,.3)",animation:"blink 2s infinite"}}>⬡ OFFLINE</span>
+          }
+          {crits>0 && <span style={{padding:"2px 7px",borderRadius:3,fontSize:11,fontWeight:700,background:"rgba(248,113,113,.15)",color:"#f87171",border:"1px solid rgba(248,113,113,.3)",animation:"blink 1.5s infinite"}}>⚠ {crits}</span>}
+          {lows>0  && <span style={{padding:"2px 7px",borderRadius:3,fontSize:11,fontWeight:700,background:"rgba(251,191,36,.15)",color:"#fbbf24",border:"1px solid rgba(251,191,36,.3)"}}>↓ {lows}</span>}
+          <Btn onClick={runScan} style={{padding:"3px 9px",borderRadius:4,fontSize:12,fontWeight:700,background:"rgba(56,189,248,.1)",border:"1px solid rgba(56,189,248,.25)",color:"#38bdf8"}}>{busy?"● …":"⟳ SCAN"}</Btn>
+          <Btn onClick={function(){setSettings(true);}} style={{padding:"3px 8px",borderRadius:4,fontSize:13,background:"transparent",border:"1px solid rgba(255,255,255,.07)",color:"#4a5568"}}>⚙</Btn>
+        </div>
+        <div style={{display:"flex",gap:3,flexWrap:"wrap"}}>
+          {TABS.map(function(tab){
+            return <Btn key={tab.v} onClick={function(){setView(tab.v);}} style={{padding:"10px 22px",borderRadius:7,fontSize:15,fontWeight:600,border:"1px solid "+(view===tab.v?"#38bdf8":"rgba(255,255,255,.06)"),background:view===tab.v?"rgba(56,189,248,.1)":"transparent",color:view===tab.v?"#38bdf8":"#4a5568"}}>{tab.l}</Btn>;
+          })}
+        </div>
+      </div>
+
+      {/* ── BYLINE STRIP ── */}
+      <div style={{background:"linear-gradient(90deg,rgba(56,189,248,.04),rgba(129,140,248,.07),rgba(52,211,153,.04))",borderBottom:"1px solid rgba(56,189,248,.07)",padding:"7px 20px",display:"flex",alignItems:"center",justifyContent:"center",gap:10,flexShrink:0,position:"sticky",top:57,zIndex:49,backdropFilter:"blur(12px)"}}>
+        <div style={{width:20,height:1,background:"linear-gradient(90deg,transparent,rgba(56,189,248,.35))"}}/>
+        <span style={{fontSize:13,color:"rgba(129,140,248,.7)",fontFamily:"'Space Grotesk',sans-serif",fontWeight:500,letterSpacing:1.5,fontStyle:"italic"}}>FORGE Autonomous Inventory Brain</span>
+        <span style={{fontSize:13,color:"rgba(56,189,248,.3)"}}>·</span>
+        <span style={{fontSize:13,color:"rgba(129,140,248,.9)",fontFamily:"'Space Grotesk',sans-serif",fontWeight:600,letterSpacing:.5}}>by Arpan Dixit</span>
+        <div style={{width:20,height:1,background:"linear-gradient(90deg,rgba(52,211,153,.35),transparent)"}}/>
+      </div>
+
+      {/* BRAIN */}
+      {view==="brain" && (
+        <div style={{flex:1,display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,padding:12,position:"relative",zIndex:1,overflowY:"auto"}}>
+          <div style={{gridColumn:"1/-1",padding:"9px 14px",borderRadius:8,background:aiOn?"rgba(52,211,153,.04)":getApiKey()?"rgba(129,140,248,.06)":"rgba(251,191,36,.05)",border:"1px solid "+(aiOn?"rgba(52,211,153,.14)":getApiKey()?"rgba(129,140,248,.17)":"rgba(251,191,36,.25)"),display:"flex",alignItems:"center",gap:10}}>
+            <div style={{flex:1}}>
+              <div style={{fontSize:13,fontWeight:800,color:aiOn?"#34d399":getApiKey()?"#818cf8":"#fbbf24",letterSpacing:2}}>{aiOn?"🌐 AI BRAIN ACTIVE":getApiKey()?"⬡ CONNECTING…":"🔑 API KEY REQUIRED"}</div>
+              <div style={{fontSize:12,color:"#2d3748",marginTop:1}}>{aiOn?"Claude AI — smart alerts & ordering intelligence":getApiKey()?"Checking connection…":"Add your Anthropic API key in Settings to enable AI features"}</div>
+            </div>
+            {!getApiKey() && <Btn onClick={function(){setSettings(true);}} style={{fontSize:12,padding:"4px 10px",borderRadius:5,background:"rgba(251,191,36,.15)",border:"1px solid rgba(251,191,36,.35)",color:"#fbbf24",fontWeight:700,flexShrink:0}}>⚙ Add Key</Btn>}
+            <div style={{fontSize:12,padding:"3px 9px",borderRadius:4,background:"rgba(52,211,153,.07)",border:"1px solid rgba(52,211,153,.14)",color:"#34d399"}}>
+              💾 {inv.length} items · {bills.length} bills · {mem.length} decisions
+            </div>
+          </div>
+
+          <div style={{background:"rgba(248,113,113,.04)",border:"1px solid rgba(248,113,113,.12)",borderRadius:10,padding:12}}>
+            <div style={{display:"flex",justifyContent:"space-between",marginBottom:8}}>
+              <span style={{fontSize:14,fontWeight:700,color:"#f87171",letterSpacing:2,fontFamily:"'Space Grotesk',sans-serif"}}>⚠ ALERTS</span>
+              <span style={{fontSize:12,color:"#2d3748"}}>{alts.length}</span>
+            </div>
+            <div style={{display:"flex",flexDirection:"column",gap:6,maxHeight:200,overflowY:"auto"}}>
+              {!alts.length && <div style={{textAlign:"center",padding:"18px 0",color:"#1e2d3d",fontSize:14}}>All systems normal ✓<br/><span style={{fontSize:12,color:"#1a2535"}}>Run SCAN to check</span></div>}
+              {alts.map(function(a){
+                return (
+                  <div key={a.id} style={{background:a.sev==="critical"?"rgba(248,113,113,.07)":"rgba(251,191,36,.06)",border:"1px solid "+(a.sev==="critical"?"rgba(248,113,113,.2)":"rgba(251,191,36,.2)"),borderRadius:7,padding:"8px 10px"}}>
+                    <div style={{display:"flex",gap:5,justifyContent:"space-between"}}>
+                      <div style={{flex:1}}>
+                        <div style={{color:a.sev==="critical"?"#f87171":"#fbbf24",fontWeight:700,fontSize:14,marginBottom:2}}>{a.item}</div>
+                        <div style={{color:"#718096",fontSize:13,lineHeight:1.4}}>{a.msg}</div>
+                        <div style={{color:"#38bdf8",fontSize:13,marginTop:3}}>→ {a.act}</div>
+                      </div>
+                      <Btn onClick={function(){setAlts(function(p){return p.filter(function(x){return x.id!==a.id;});});}} style={{background:"transparent",border:"none",color:"#2d3748",fontSize:14,padding:"0 2px"}}>✕</Btn>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          <div style={{background:"rgba(129,140,248,.04)",border:"1px solid rgba(129,140,248,.12)",borderRadius:10,padding:12}}>
+            <div style={{display:"flex",justifyContent:"space-between",marginBottom:8}}>
+              <span style={{fontSize:14,fontWeight:700,color:"#818cf8",letterSpacing:2,fontFamily:"'Space Grotesk',sans-serif"}}>💡 ORDERS</span>
+              <span style={{fontSize:12,color:"#2d3748"}}>{aiOn?"AI":"rules"}</span>
+            </div>
+            <div style={{display:"flex",flexDirection:"column",gap:6,maxHeight:200,overflowY:"auto"}}>
+              {!sugg.length && <div style={{textAlign:"center",padding:"18px 0",color:"#1e2d3d",fontSize:14}}>Run a scan to generate</div>}
+              {sugg.map(function(s){
+                return (
+                  <div key={s.id} style={{background:"rgba(129,140,248,.05)",border:"1px solid "+(s.urgency==="URGENT"?"rgba(248,113,113,.3)":"rgba(129,140,248,.2)"),borderRadius:7,padding:"8px 10px"}}>
+                    <div style={{display:"flex",justifyContent:"space-between",marginBottom:3}}>
+                      <div><b style={{color:"#e2e8f0",fontSize:14}}>{s.item}</b><div style={{fontSize:11,color:s.urgency==="URGENT"?"#f87171":s.urgency==="SOON"?"#fbbf24":"#34d399",fontWeight:700,letterSpacing:1,marginTop:1}}>{s.urgency}</div></div>
+                      <div style={{textAlign:"right"}}><div style={{color:"#38bdf8",fontWeight:700}}>{s.qty} {s.unit}</div><div style={{color:"#818cf8",fontSize:13}}>₹{s.cost}</div></div>
+                    </div>
+                    <div style={{fontSize:13,color:"#4a5568",marginBottom:4}}>{s.reason}</div>
+                    <div style={{fontSize:12,color:"#2d3748",marginBottom:6}}>{s.supplier} · {s.delivery}</div>
+                    <div style={{display:"flex",gap:5}}>
+                      <Btn onClick={function(){accept(s);}} style={{flex:1,padding:"5px",borderRadius:5,background:"rgba(52,211,153,.1)",border:"1px solid rgba(52,211,153,.3)",color:"#34d399",fontSize:13,fontWeight:700}}>✓ Accept & Save</Btn>
+                      <Btn onClick={function(){dismiss(s);}} style={{padding:"5px 8px",borderRadius:5,background:"transparent",border:"1px solid rgba(255,255,255,.07)",color:"#2d3748",fontSize:13}}>✕</Btn>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          <div style={{gridColumn:"1/-1",background:"rgba(56,189,248,.02)",border:"1px solid rgba(56,189,248,.07)",borderRadius:10,padding:12}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+              <span style={{fontSize:13,fontWeight:800,color:"#38bdf8",letterSpacing:3,display:"flex",alignItems:"center",gap:6}}>
+                {busy && <span style={{width:6,height:6,borderRadius:"50%",background:"#38bdf8",display:"inline-block",animation:"blink .4s infinite"}}/>}
+                🧠 BRAIN LOG
+              </span>
+              <Btn onClick={genBrief} style={{padding:"3px 9px",borderRadius:4,fontSize:12,background:"rgba(56,189,248,.07)",border:"1px solid rgba(56,189,248,.18)",color:"#38bdf8"}}>📋 Briefing</Btn>
+            </div>
+            <div style={{display:"flex",flexDirection:"column",gap:3,maxHeight:100,overflowY:"auto"}}>
+              {log.map(function(l){
+                return (
+                  <div key={l.id} style={{display:"flex",gap:8,padding:"2px 0",borderBottom:"1px solid rgba(255,255,255,.02)"}}>
+                    <span style={{fontSize:11,color:"#38bdf8",opacity:.35,flexShrink:0,minWidth:34}}>{l.t}</span>
+                    <span style={{fontSize:13,color:l.type==="alert"?"#f87171":l.type==="ok"?"#34d399":l.type==="error"?"#fbbf24":"#4a5568"}}>{l.m}</span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {mem.length > 0 && (
+            <div style={{gridColumn:"1/-1",background:"rgba(52,211,153,.015)",border:"1px solid rgba(52,211,153,.07)",borderRadius:10,padding:12}}>
+              <div style={{fontSize:13,fontWeight:800,color:"#34d399",letterSpacing:3,marginBottom:6}}>🧬 MEMORY — {mem.length} decisions</div>
+              <div style={{display:"flex",flexDirection:"column",gap:2,maxHeight:55,overflowY:"auto"}}>
+                {mem.slice().reverse().map(function(m,i){ return <div key={i} style={{fontSize:13,color:"#2d3748"}}><span style={{color:"#1a2535",marginRight:5}}>#{mem.length-i}</span>{m}</div>; })}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* CHAT */}
+      {view==="chat" && (
+        <div style={{flex:1,display:"flex",flexDirection:"column",maxWidth:780,width:"100%",margin:"0 auto",padding:"0 12px",position:"relative",zIndex:1,height:"calc(100vh - 60px)"}}>
+          <div style={{marginTop:8,padding:"5px 12px",borderRadius:7,background:aiOn?"rgba(52,211,153,.04)":"rgba(129,140,248,.06)",border:"1px solid "+(aiOn?"rgba(52,211,153,.12)":"rgba(129,140,248,.15)"),display:"flex",gap:8,alignItems:"center",flexShrink:0}}>
+            <span style={{fontSize:12,fontWeight:800,color:aiOn?"#34d399":"#818cf8",letterSpacing:2}}>{aiOn?"AI CHAT":"OFFLINE"}</span>
+            <span style={{fontSize:12,color:"#2d3748",flex:1}}>{aiOn?"Claude AI powered":"Rule engine — works offline"}</span>
+            <span style={{fontSize:12,color:"#34d399"}}>💾 saved</span>
+          </div>
+          {!msgs.length && (
+            <div style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:12,opacity:.25}}>
+              <Logo sz={50}/>
+              <div style={{color:"#38bdf8",fontWeight:700,fontSize:16,letterSpacing:3}}>FORGE IS LISTENING</div>
+            </div>
+          )}
+          <div style={{flex:1,overflowY:"auto",padding:"10px 0 6px",display:"flex",flexDirection:"column",gap:9}}>
+            {msgs.map(function(m, i){
+              return (
+                <div key={i} style={{display:"flex",flexDirection:m.r==="user"?"row-reverse":"row",gap:7,alignItems:"flex-start"}}>
+                  {m.r==="ai" && <div style={{flexShrink:0,display:"flex",flexDirection:"column",alignItems:"center",gap:1}}><Logo sz={20}/><span style={{fontSize:7,color:m.mode==="ai"?"#34d399":"#818cf8"}}>{m.mode==="ai"?"AI":"LOCAL"}</span></div>}
+                  <div style={{maxWidth:"80%",padding:"8px 11px",borderRadius:m.r==="user"?"10px 3px 10px 10px":"3px 10px 10px 10px",background:m.r==="user"?"rgba(56,189,248,.09)":"rgba(255,255,255,.03)",border:"1px solid "+(m.r==="user"?"rgba(56,189,248,.2)":"rgba(255,255,255,.05)"),color:m.r==="user"?"#7dd3fc":"#e2e8f0"}}>
+                    <Md text={m.c}/>
+                  </div>
+                </div>
+              );
+            })}
+            {chatBusy && (
+              <div style={{display:"flex",gap:7,alignItems:"flex-start"}}>
+                <Logo sz={20}/>
+                <div style={{padding:"9px 12px",background:"rgba(255,255,255,.03)",border:"1px solid rgba(255,255,255,.05)",borderRadius:"3px 10px 10px 10px",display:"flex",gap:4}}>
+                  {[0,1,2].map(function(i){ return <div key={i} style={{width:6,height:6,borderRadius:"50%",background:aiOn?"#34d399":"#818cf8",animation:"pulse 1s ease "+(i*.18)+"s infinite"}}/>; })}
+                </div>
+              </div>
+            )}
+            <div ref={chatEnd}/>
+          </div>
+          <div style={{display:"flex",gap:4,flexWrap:"wrap",padding:"3px 0"}}>
+            {["What's critical?","Order suggestions","Stock overview","Billing","Days to stockout"].map(function(p){
+              return <Btn key={p} onClick={function(){send(p);}} style={{padding:"3px 8px",fontSize:12,borderRadius:20,background:"rgba(56,189,248,.05)",border:"1px solid rgba(56,189,248,.12)",color:"#38bdf8",whiteSpace:"nowrap"}}>{p}</Btn>;
+            })}
+          </div>
+          <div style={{display:"flex",gap:6,padding:"5px 0 8px"}}>
+            <input value={cin} onChange={function(e){setCin(e.target.value);}} onKeyDown={function(e){if(e.key==="Enter")send();}} disabled={chatBusy} placeholder="Ask about your inventory…" style={{flex:1,padding:"9px 12px",fontSize:15,background:"rgba(255,255,255,.04)",border:"1px solid rgba(56,189,248,.2)",borderRadius:8,color:"#e2e8f0",outline:"none",fontFamily:"'Inter',sans-serif"}}/>
+            <Btn onClick={function(){send();}} style={{padding:"0 14px",borderRadius:8,fontSize:18,background:cin.trim()&&!chatBusy?"rgba(56,189,248,.14)":"transparent",border:"1px solid "+(cin.trim()&&!chatBusy?"#38bdf8":"rgba(255,255,255,.06)"),color:cin.trim()&&!chatBusy?"#38bdf8":"#1e2d3d"}}>➤</Btn>
+          </div>
+        </div>
+      )}
+
+      {/* STOCK */}
+      {view==="dash" && (
+        <div style={{flex:1,padding:12,overflowY:"auto",position:"relative",zIndex:1}}>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(100px,1fr))",gap:8,marginBottom:12}}>
+            {[["Items",inv.length,"#38bdf8"],["Critical",crits,"#f87171"],["Low",lows,"#fbbf24"],["Value",fmt(tv),"#818cf8"]].map(function(item){
+              return <div key={item[0]} style={{background:"rgba(255,255,255,.03)",border:"1px solid rgba(255,255,255,.05)",borderTop:"3px solid "+item[2],borderRadius:8,padding:"10px 12px"}}>
+                <div style={{fontSize:17,fontWeight:800,color:item[2]}}>{item[1]}</div>
+                <div style={{fontSize:12,color:"#2d3748",letterSpacing:2,marginTop:2}}>{item[0].toUpperCase()}</div>
+              </div>;
+            })}
+          </div>
+          <div style={{display:"flex",gap:5,marginBottom:8,flexWrap:"wrap",alignItems:"center"}}>
+            {["all","critical","low","ok"].map(function(f){
+              return <Btn key={f} onClick={function(){setFilter(f);}} style={{padding:"3px 9px",fontSize:12,borderRadius:4,border:"1px solid "+(filter===f?"#38bdf8":"rgba(255,255,255,.07)"),background:filter===f?"rgba(56,189,248,.1)":"transparent",color:filter===f?"#38bdf8":"#2d3748"}}>{f.toUpperCase()}{f!=="all"?" ("+inv.filter(function(i){return getStatus(i)===f;}).length+")":""}</Btn>;
+            })}
+            <div style={{marginLeft:"auto",display:"flex",gap:5,alignItems:"center",flexWrap:"wrap"}}>
+              <select value={locFilter} onChange={function(e){setLocFilter(e.target.value);}} style={{padding:"4px 8px",background:"rgba(0,0,0,.4)",border:"1px solid rgba(56,189,248,.18)",borderRadius:5,color:"#818cf8",fontSize:13,outline:"none"}}>
+                <option value="all">🏭 All Locations</option>
+                {LOCATIONS.map(function(l){return <option key={l}>{l}</option>;})}
+              </select>
+              <Btn onClick={startScanner} style={{padding:"4px 10px",fontSize:13,fontWeight:700,background:"rgba(52,211,153,.1)",border:"1px solid rgba(52,211,153,.25)",borderRadius:5,color:"#34d399"}}>📷 Scan Barcode</Btn>
+            </div>
+          </div>
+          <div style={{overflowX:"auto"}}>
+            <table style={{width:"100%",borderCollapse:"collapse",fontSize:14}}>
+              <thead>
+                <tr style={{borderBottom:"1px solid rgba(56,189,248,.12)"}}>
+                  {["Item","Location","Stock","Use/d","Days","Reorder","Lead","Suggest","Delivery","Supplier","₹/Unit","Status",""].map(function(h){
+                    return <th key={h} style={{padding:"5px 7px",textAlign:"left",color:"#38bdf8",fontSize:12,letterSpacing:2,fontWeight:700,whiteSpace:"nowrap"}}>{h}</th>;
+                  })}
+                </tr>
+              </thead>
+              <tbody>
+                {fInv.map(function(i){
+                  var st = getStatus(i), c = SCFG[st], dl = getDays(i);
+                  return (
+                    <tr key={i.id} style={{borderBottom:"1px solid rgba(255,255,255,.025)",background:st==="critical"?"rgba(248,113,113,.04)":st==="low"?"rgba(251,191,36,.03)":"transparent"}}>
+                      <td style={{padding:"6px 7px"}}><b style={{color:"#c7d2fe"}}>{i.name}</b></td>
+                      <td style={{padding:"6px 7px",color:"#818cf8",fontSize:12,whiteSpace:"nowrap"}}>{i.location||"Main Warehouse"}</td>
+                      <td style={{padding:"6px 7px",color:c.c,fontWeight:700,whiteSpace:"nowrap"}}>{i.qty} {i.unit}</td>
+                      <td style={{padding:"6px 7px"}}>{i.usage}</td>
+                      <td style={{padding:"6px 7px",color:dl<=i.lead&&dl!==999?"#f87171":"inherit",fontWeight:700}}>{dl===999?"∞":dl+"d"}</td>
+                      <td style={{padding:"6px 7px"}}>{i.reorder}</td>
+                      <td style={{padding:"6px 7px"}}>{i.lead}d</td>
+                      <td style={{padding:"6px 7px",color:"#38bdf8",fontWeight:600}}>{getSugQty(i)}</td>
+                      <td style={{padding:"6px 7px",fontSize:13,whiteSpace:"nowrap"}}>{getDeliv(i)}</td>
+                      <td style={{padding:"6px 7px",color:"#818cf8",fontSize:12,whiteSpace:"nowrap"}}>{i.supplier}</td>
+                      <td style={{padding:"6px 7px"}}>₹{i.cost}</td>
+                      <td style={{padding:"6px 7px"}}><span style={{padding:"2px 5px",borderRadius:3,fontSize:11,fontWeight:700,background:c.bg,color:c.c}}>{c.l}</span></td>
+                      <td style={{padding:"6px 7px",whiteSpace:"nowrap"}}>
+                        <Btn onClick={function(){setEditItem(Object.assign({},i));}} style={{padding:"2px 8px",fontSize:12,fontWeight:700,background:"rgba(56,189,248,.1)",border:"1px solid rgba(56,189,248,.25)",borderRadius:4,color:"#38bdf8",marginRight:4}}>✏ Edit</Btn>
+                        <Btn onClick={function(){setInv(function(p){return p.filter(function(x){return x.id!==i.id;});});addLog("🗑 Removed "+i.name,"ok");showToast("Removed "+i.name,"warn");}} style={{padding:"2px 8px",fontSize:12,fontWeight:700,background:"rgba(248,113,113,.08)",border:"1px solid rgba(248,113,113,.2)",borderRadius:4,color:"#f87171"}}>✕</Btn>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          <div style={{marginTop:8,fontSize:12,color:"#1e2d3d",textAlign:"right"}}>💾 Saved {savedAt||"—"}</div>
+        </div>
+      )}
+
+      {/* ADD */}
+      {view==="add" && (
+        <div style={{flex:1,padding:12,overflowY:"auto",position:"relative",zIndex:1}}>
+          {/* Header + tab switcher */}
+          <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",marginBottom:12,flexWrap:"wrap",gap:8}}>
+            <div>
+              <div style={{fontSize:15,fontWeight:800,color:"#38bdf8",letterSpacing:2}}>➕ ADD INVENTORY</div>
+              <div style={{fontSize:13,color:"#34d399",marginTop:2}}>💾 {inv.length} items saved</div>
+            </div>
+            <div style={{display:"flex",background:"rgba(255,255,255,.04)",borderRadius:8,padding:3,border:"1px solid rgba(56,189,248,.1)"}}>
+              {[["manual","✏ Manual"],["upload","📂 Upload File"]].map(function(t){
+                return <Btn key={t[0]} onClick={function(){setAddTab(t[0]);setUploadRows(null);setUploadErr("");}} style={{padding:"5px 14px",borderRadius:6,fontSize:13,fontWeight:700,border:"none",background:addTab===t[0]?"rgba(56,189,248,.18)":"transparent",color:addTab===t[0]?"#38bdf8":"#4a5568"}}>{t[1]}</Btn>;
+              })}
+            </div>
+          </div>
+
+          {/* MANUAL */}
+          {addTab==="manual" && (
+            <div style={{background:"rgba(255,255,255,.025)",border:"1px solid rgba(56,189,248,.1)",borderRadius:10,padding:18,maxWidth:820}}>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(170px,1fr))",gap:10,marginBottom:12}}>
+                <LBL l="Name *" err={mErr.name} span={2}><input style={IS(mErr.name)} placeholder="e.g. Steel Bolts M10" value={mf.name} onChange={function(e){setMf(function(p){return Object.assign({},p,{name:e.target.value});})}}/></LBL>
+                <LBL l="Qty"><input style={IS()} type="number" min="0" value={mf.qty} onChange={function(e){setMf(function(p){return Object.assign({},p,{qty:e.target.value});})}}/></LBL>
+                <LBL l="Unit"><select style={IS()} value={mf.unit} onChange={function(e){setMf(function(p){return Object.assign({},p,{unit:e.target.value});})}}>{["pcs","cans","kg","liters","meters","rolls","boxes","sets"].map(function(u){return <option key={u}>{u}</option>;})}</select></LBL>
+                <LBL l="Reorder Level"><input style={IS()} type="number" min="0" value={mf.reorder} onChange={function(e){setMf(function(p){return Object.assign({},p,{reorder:e.target.value});})}}/></LBL>
+                <LBL l="Daily Usage"><input style={IS()} type="number" min="0" step="0.1" value={mf.usage} onChange={function(e){setMf(function(p){return Object.assign({},p,{usage:e.target.value});})}}/></LBL>
+                <LBL l="Lead Days *" err={mErr.lead}><input style={IS(mErr.lead)} type="number" min="1" value={mf.lead} onChange={function(e){setMf(function(p){return Object.assign({},p,{lead:e.target.value});})}}/></LBL>
+                <LBL l="Cost/Unit ₹ *" err={mErr.cost}><input style={IS(mErr.cost)} type="number" min="0" step="0.01" value={mf.cost} onChange={function(e){setMf(function(p){return Object.assign({},p,{cost:e.target.value});})}}/></LBL>
+                <LBL l="Supplier *" err={mErr.supplier} span={2}><input style={IS(mErr.supplier)} value={mf.supplier} onChange={function(e){setMf(function(p){return Object.assign({},p,{supplier:e.target.value});})}}/></LBL>
+                <LBL l="Location" span={2}><select style={IS()} value={mf.location||"Main Warehouse"} onChange={function(e){setMf(function(p){return Object.assign({},p,{location:e.target.value});})}}>{LOCATIONS.map(function(l){return <option key={l}>{l}</option>;})}</select></LBL>
+              </div>
+              {previewOk && (
+                <div style={{background:"rgba(56,189,248,.04)",border:"1px solid rgba(56,189,248,.1)",borderRadius:8,padding:"9px 13px",marginBottom:12}}>
+                  <div style={{fontSize:12,color:"#38bdf8",letterSpacing:2,marginBottom:7}}>⚡ LIVE PREVIEW</div>
+                  <div style={{display:"flex",gap:7,flexWrap:"wrap"}}>
+                    {[["Days of stock",Math.floor(qQ/qU)+"d","#38bdf8"],["Suggest order",getSugQty({usage:qU,lead:qL})+" "+(mf.unit||"pcs"),"#fbbf24"],["Est. delivery",getDeliv({lead:qL}),"#818cf8"]].map(function(it){
+                      return <div key={it[0]} style={{background:"rgba(255,255,255,.03)",border:"1px solid "+it[2]+"22",borderRadius:6,padding:"6px 10px"}}><div style={{fontSize:11,color:"#2d3748",marginBottom:2}}>{it[0]}</div><div style={{fontSize:15,fontWeight:800,color:it[2]}}>{it[1]}</div></div>;
+                    })}
+                  </div>
+                </div>
+              )}
+              <div style={{display:"flex",gap:7,justifyContent:"flex-end"}}>
+                <Btn onClick={function(){setMf({name:"",qty:"",unit:"pcs",reorder:"",usage:"",lead:"",supplier:"",cost:""});setMErr({});}} style={{padding:"7px 13px",background:"transparent",border:"1px solid rgba(255,255,255,.07)",borderRadius:7,color:"#2d3748"}}>Clear</Btn>
+                <Btn onClick={submitAdd} style={{padding:"7px 20px",background:"linear-gradient(135deg,#38bdf8,#818cf8)",border:"none",borderRadius:7,color:"#020917",fontSize:15,fontWeight:800}}>+ Add & Save</Btn>
+              </div>
+            </div>
+          )}
+
+          {/* UPLOAD */}
+          {addTab==="upload" && (
+            <div style={{maxWidth:820}}>
+              {!uploadRows && (
+                <div>
+                  <div
+                    onDragOver={function(e){e.preventDefault();setDrag(true);}}
+                    onDragLeave={function(){setDrag(false);}}
+                    onDrop={function(e){e.preventDefault();setDrag(false);var f=e.dataTransfer.files[0];if(f)parseFile(f);}}
+                    onClick={function(){document.getElementById("forge-file-in").click();}}
+                    style={{border:"2px dashed "+(drag?"#38bdf8":"rgba(56,189,248,.25)"),borderRadius:14,padding:"52px 24px",textAlign:"center",cursor:"pointer",background:drag?"rgba(56,189,248,.07)":"rgba(56,189,248,.02)",transition:"all .2s",marginBottom:16}}
+                  >
+                    {uploading
+                      ? <div style={{color:"#38bdf8",fontSize:16,fontWeight:700,letterSpacing:2}}><div style={{fontSize:32,marginBottom:12,animation:"blink .7s infinite"}}>⚙</div>READING FILE…</div>
+                      : <div>
+                          <div style={{fontSize:52,marginBottom:14}}>{drag?"⬇":"📂"}</div>
+                          <div style={{fontSize:17,fontWeight:800,color:"#38bdf8",letterSpacing:2,marginBottom:8}}>DROP YOUR FILE HERE</div>
+                          <div style={{fontSize:15,color:"#4a5568",marginBottom:18}}>or click to browse from your computer</div>
+                          <div style={{display:"flex",justifyContent:"center",gap:8,flexWrap:"wrap"}}>
+                            {[".xlsx · Excel",".xls · Old Excel",".csv · CSV",".tsv · Tab-separated"].map(function(tag){
+                              return <span key={tag} style={{padding:"4px 12px",borderRadius:20,fontSize:13,background:"rgba(56,189,248,.08)",border:"1px solid rgba(56,189,248,.18)",color:"#38bdf8"}}>{tag}</span>;
+                            })}
+                          </div>
+                        </div>
+                    }
+                    <input id="forge-file-in" type="file" accept=".xlsx,.xls,.csv,.tsv,.ods,.txt" style={{display:"none"}} onChange={function(e){var f=e.target.files[0];if(f)parseFile(f);e.target.value="";}}/>
+                  </div>
+                  {uploadErr && <div style={{padding:"10px 14px",borderRadius:8,background:"rgba(248,113,113,.08)",border:"1px solid rgba(248,113,113,.25)",color:"#f87171",fontSize:14,marginBottom:14}}>⚠ {uploadErr}</div>}
+                  <div style={{background:"rgba(255,255,255,.025)",border:"1px solid rgba(56,189,248,.08)",borderRadius:10,padding:16}}>
+                    <div style={{fontSize:12,color:"#38bdf8",letterSpacing:3,fontWeight:800,marginBottom:10}}>📋 SUPPORTED COLUMN NAMES</div>
+                    <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(200px,1fr))",gap:8}}>
+                      {[["Item Name","name, item, product, description"],["Quantity","qty, quantity, stock, onhand"],["Unit","unit, units, uom"],["Reorder Level","reorder, reorderlevel, minstock"],["Daily Usage","usage, dailyusage, consumption"],["Lead Days","lead, leadtime, deliverydays"],["Supplier","supplier, vendor, manufacturer"],["Cost/Unit","cost, costperunit, price, unitprice"]].map(function(row){
+                        return <div key={row[0]} style={{padding:"8px 10px",background:"rgba(56,189,248,.03)",borderRadius:7,border:"1px solid rgba(56,189,248,.07)"}}><div style={{fontSize:13,fontWeight:700,color:"#c7d2fe",marginBottom:3}}>{row[0]}</div><div style={{fontSize:12,color:"#2d3748"}}>{row[1]}</div></div>;
+                      })}
+                    </div>
+                    <div style={{marginTop:12,fontSize:13,color:"#4a5568"}}>💡 Column names are auto-detected. Only <b style={{color:"#38bdf8"}}>name</b> is required. Missing fields default to 0.</div>
+                  </div>
+                </div>
+              )}
+              {uploadRows && (
+                <div>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12,flexWrap:"wrap",gap:8}}>
+                    <div>
+                      <div style={{fontSize:14,fontWeight:800,color:"#34d399"}}>✓ {uploadRows.fileName}</div>
+                      <div style={{fontSize:13,color:"#4a5568",marginTop:2}}>{uploadRows.items.length} items detected — review below</div>
+                    </div>
+                    <Btn onClick={function(){setUploadRows(null);setUploadErr("");}} style={{padding:"5px 12px",background:"transparent",border:"1px solid rgba(255,255,255,.1)",borderRadius:7,color:"#4a5568",fontSize:13}}>← Re-upload</Btn>
+                  </div>
+                  <div style={{overflowX:"auto",borderRadius:10,border:"1px solid rgba(56,189,248,.1)",marginBottom:14}}>
+                    <table style={{width:"100%",borderCollapse:"collapse",fontSize:14}}>
+                      <thead><tr style={{background:"rgba(56,189,248,.07)"}}>
+                        {["#","Name","Qty","Unit","Reorder","Usage/d","Lead","Supplier","₹/Unit"].map(function(h){return <th key={h} style={{padding:"8px 10px",textAlign:"left",color:"#38bdf8",fontSize:12,letterSpacing:2,fontWeight:700,whiteSpace:"nowrap"}}>{h}</th>;})}
+                      </tr></thead>
+                      <tbody>
+                        {uploadRows.items.slice(0,15).map(function(item,i){
+                          return <tr key={i} style={{borderTop:"1px solid rgba(255,255,255,.04)",background:i%2===0?"rgba(255,255,255,.01)":"transparent"}}>
+                            <td style={{padding:"7px 10px",color:"#2d3748",fontSize:13}}>{i+1}</td>
+                            <td style={{padding:"7px 10px"}}><b style={{color:"#c7d2fe"}}>{item.name}</b></td>
+                            <td style={{padding:"7px 10px",color:item.qty>0?"#34d399":"#f87171",fontWeight:700}}>{item.qty}</td>
+                            <td style={{padding:"7px 10px",color:"#818cf8"}}>{item.unit}</td>
+                            <td style={{padding:"7px 10px",color:"#4a5568"}}>{item.reorder||"—"}</td>
+                            <td style={{padding:"7px 10px",color:"#4a5568"}}>{item.usage||"—"}</td>
+                            <td style={{padding:"7px 10px",color:"#4a5568"}}>{item.lead}d</td>
+                            <td style={{padding:"7px 10px",color:item.supplier?"#818cf8":"#1e2d3d",fontSize:13}}>{item.supplier||"—"}</td>
+                            <td style={{padding:"7px 10px",color:item.cost>0?"#fbbf24":"#1e2d3d"}}>{item.cost>0?"₹"+item.cost.toFixed(2):"—"}</td>
+                          </tr>;
+                        })}
+                      </tbody>
+                    </table>
+                    {uploadRows.items.length>15 && <div style={{padding:"8px 14px",fontSize:12,color:"#2d3748",borderTop:"1px solid rgba(255,255,255,.04)",textAlign:"center"}}>+{uploadRows.items.length-15} more rows</div>}
+                  </div>
+                  {(function(){
+                    var warn=[];
+                    var ns=uploadRows.items.filter(function(i){return !i.supplier;}).length;
+                    var nc=uploadRows.items.filter(function(i){return !i.cost;}).length;
+                    if(ns>0)warn.push(ns+" items missing supplier");
+                    if(nc>0)warn.push(nc+" items missing cost");
+                    if(!warn.length)return null;
+                    return <div style={{padding:"10px 14px",borderRadius:8,background:"rgba(251,191,36,.06)",border:"1px solid rgba(251,191,36,.2)",color:"#fbbf24",fontSize:14,marginBottom:12}}>⚠ {warn.join(" · ")} — you can edit these in the Stock tab later.</div>;
+                  })()}
+                  <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
+                    <Btn onClick={function(){setUploadRows(null);}} style={{padding:"9px 16px",background:"transparent",border:"1px solid rgba(255,255,255,.1)",borderRadius:8,color:"#4a5568",fontSize:14}}>Cancel</Btn>
+                    <Btn onClick={importUploadedRows} style={{padding:"9px 28px",background:"linear-gradient(135deg,#34d399,#38bdf8)",border:"none",borderRadius:8,color:"#020917",fontSize:16,fontWeight:900,letterSpacing:1}}>✓ Import {uploadRows.items.length} Items</Btn>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* BILLING */}
+      {view==="bill" && (
+        <div style={{flex:1,padding:12,overflowY:"auto",position:"relative",zIndex:1}}>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(95px,1fr))",gap:8,marginBottom:12}}>
+            {[["Invoices",bills.length,"#38bdf8"],["Revenue",fmt(rev),"#34d399"],["Outstanding",fmt(outstanding),"#fbbf24"],["Overdue",bills.filter(function(b){return b.status==="overdue";}).length,"#f87171"]].map(function(item){
+              return <div key={item[0]} style={{background:"rgba(255,255,255,.03)",border:"1px solid rgba(255,255,255,.05)",borderTop:"3px solid "+item[2],borderRadius:8,padding:"9px 11px"}}>
+                <div style={{fontSize:18,fontWeight:800,color:item[2]}}>{item[1]}</div>
+                <div style={{fontSize:12,color:"#2d3748",letterSpacing:2,marginTop:2}}>{item[0].toUpperCase()}</div>
+              </div>;
+            })}
+          </div>
+
+          {billingView==="list" && (
+            <div>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10,flexWrap:"wrap",gap:7}}>
+                <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>
+                  {["all","draft","issued","paid","overdue"].map(function(f){
+                    return <Btn key={f} onClick={function(){setBfilt(f);}} style={{padding:"3px 8px",fontSize:12,borderRadius:4,border:"1px solid "+(bfilt===f?"#38bdf8":"rgba(255,255,255,.07)"),background:bfilt===f?"rgba(56,189,248,.1)":"transparent",color:bfilt===f?"#38bdf8":"#2d3748"}}>{f.toUpperCase()}{f!=="all"?" ("+bills.filter(function(b){return b.status===f;}).length+")":""}</Btn>;
+                  })}
+                </div>
+                <Btn onClick={function(){setBillingView("create");}} style={{padding:"6px 13px",background:"linear-gradient(135deg,#38bdf8,#818cf8)",border:"none",borderRadius:7,color:"#020917",fontSize:14,fontWeight:800}}>+ New Invoice</Btn>
+              </div>
+              {!fBills.length && <div style={{textAlign:"center",padding:"36px 20px",color:"#1e2d3d",border:"1px dashed rgba(56,189,248,.1)",borderRadius:10}}>
+                <div style={{fontSize:32,marginBottom:8}}>🧾</div>
+                <div style={{color:"#2d3748"}}>No invoices yet</div>
+              </div>}
+              <div style={{display:"flex",flexDirection:"column",gap:7}}>
+                {fBills.map(function(bill){
+                  var c = BCFG[bill.status];
+                  return (
+                    <div key={bill.id} style={{background:"rgba(255,255,255,.025)",border:"1px solid rgba(255,255,255,.05)",borderRadius:9,padding:"11px 14px",cursor:"pointer"}} onClick={function(){setActiveBill(bill);setBillingView("detail");}}>
+                      <div style={{display:"flex",justifyContent:"space-between",gap:8}}>
+                        <div style={{flex:1}}>
+                          <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:3}}>
+                            <span style={{fontWeight:800,color:"#38bdf8"}}>{bill.id}</span>
+                            <span style={{padding:"2px 5px",borderRadius:3,fontSize:11,fontWeight:700,background:c.bg,color:c.c}}>{c.l}</span>
+                          </div>
+                          <div style={{fontWeight:700,color:"#e2e8f0",marginBottom:2}}>{bill.clientName}</div>
+                          <div style={{fontSize:13,color:"#2d3748"}}>{bill.lines.length} items · Due: {bill.dueDate||"—"}</div>
+                        </div>
+                        <div style={{textAlign:"right"}}>
+                          <div style={{fontSize:18,fontWeight:800,color:"#34d399"}}>{fmt(bill.total)}</div>
+                          <div style={{fontSize:12,color:"#1e2d3d",marginTop:2}}>{bill.date}</div>
+                        </div>
+                      </div>
+                      <div style={{display:"flex",gap:4,marginTop:8,flexWrap:"wrap"}} onClick={function(e){e.stopPropagation();}}>
+                        {["draft","issued","paid","overdue"].filter(function(s){return s!==bill.status;}).map(function(s){
+                          return <Btn key={s} onClick={function(){setBS(bill.id,s);}} style={{padding:"3px 7px",fontSize:11,borderRadius:4,border:"1px solid "+BCFG[s].c+"44",background:BCFG[s].c+"11",color:BCFG[s].c,fontWeight:700}}>→{s}</Btn>;
+                        })}
+                        <Btn onClick={function(){delBill(bill.id);}} style={{padding:"3px 7px",fontSize:11,borderRadius:4,border:"1px solid rgba(248,113,113,.2)",background:"rgba(248,113,113,.06)",color:"#f87171",marginLeft:"auto"}}>🗑</Btn>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {billingView==="create" && (
+            <div style={{maxWidth:820}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+                <div style={{fontSize:17,fontWeight:700,color:"#38bdf8",letterSpacing:1,fontFamily:"'Space Grotesk',sans-serif"}}>🧾 New Invoice</div>
+                <Btn onClick={function(){setBillingView("list");}} style={{padding:"5px 10px",background:"transparent",border:"1px solid rgba(255,255,255,.07)",borderRadius:6,color:"#2d3748",fontSize:14}}>← Back</Btn>
+              </div>
+              <div style={{background:"rgba(255,255,255,.025)",border:"1px solid rgba(56,189,248,.1)",borderRadius:10,padding:15,marginBottom:10}}>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:9,marginBottom:9}}>
+                  <LBL l="Client Name *"><input style={IS()} value={bform.clientName} onChange={function(e){setBform(function(p){return Object.assign({},p,{clientName:e.target.value});});}} placeholder="Acme Corp"/></LBL>
+                  <LBL l="Email"><input style={IS()} type="email" value={bform.clientEmail} onChange={function(e){setBform(function(p){return Object.assign({},p,{clientEmail:e.target.value});});}}/></LBL>
+                  <LBL l="Address"><input style={IS()} value={bform.clientAddress} onChange={function(e){setBform(function(p){return Object.assign({},p,{clientAddress:e.target.value});});}}/></LBL>
+                  <LBL l="Due Date"><input style={IS()} value={bform.dueDate} onChange={function(e){setBform(function(p){return Object.assign({},p,{dueDate:e.target.value});});}} placeholder="Net 30"/></LBL>
+                </div>
+                <LBL l="Notes"><textarea style={Object.assign({},IS(),{resize:"vertical",minHeight:40})} value={bform.notes} onChange={function(e){setBform(function(p){return Object.assign({},p,{notes:e.target.value});})}}/></LBL>
+              </div>
+              <div style={{background:"rgba(255,255,255,.025)",border:"1px solid rgba(56,189,248,.1)",borderRadius:10,padding:15,marginBottom:10}}>
+                <div style={{fontSize:12,color:"#38bdf8",letterSpacing:3,fontWeight:800,marginBottom:10}}>LINE ITEMS</div>
+                <div style={{display:"grid",gridTemplateColumns:"2fr 2fr 1fr 1fr 1.3fr 26px",gap:5,marginBottom:6}}>
+                  {["From Inv","Desc","Qty","Unit","₹/Unit",""].map(function(h){return <div key={h} style={{fontSize:12,color:"#1e2d3d"}}>{h}</div>;})}
+                </div>
+                {blines.map(function(line, idx){
+                  return (
+                    <div key={idx} style={{display:"grid",gridTemplateColumns:"2fr 2fr 1fr 1fr 1.3fr 26px",gap:5,marginBottom:5,alignItems:"center"}}>
+                      <select style={IS()} value={line.invId} onChange={function(e){
+                        var v = e.target.value;
+                        var ii = v ? inv.find(function(i){return String(i.id)===v;}) : null;
+                        setBlines(function(p){ return p.map(function(l,i){ return i===idx ? Object.assign({},l,{invId:v,name:ii?ii.name:l.name,unit:ii?ii.unit:l.unit,price:ii?ii.cost:l.price}) : l; }); });
+                      }}>
+                        <option value="">— pick —</option>
+                        {inv.map(function(i){return <option key={i.id} value={i.id}>{i.name}</option>;})}
+                      </select>
+                      <input style={IS()} value={line.name} onChange={function(e){setBlines(function(p){return p.map(function(l,i){return i===idx?Object.assign({},l,{name:e.target.value}):l;});});}} placeholder="Description"/>
+                      <input style={IS()} type="number" min="0" value={line.qty} onChange={function(e){setBlines(function(p){return p.map(function(l,i){return i===idx?Object.assign({},l,{qty:e.target.value}):l;});});}}/>
+                      <input style={IS()} value={line.unit} onChange={function(e){setBlines(function(p){return p.map(function(l,i){return i===idx?Object.assign({},l,{unit:e.target.value}):l;});});}}/>
+                      <input style={IS()} type="number" min="0" step="0.01" value={line.price} onChange={function(e){setBlines(function(p){return p.map(function(l,i){return i===idx?Object.assign({},l,{price:e.target.value}):l;});});}}/>
+                      <Btn onClick={function(){setBlines(function(p){return p.filter(function(_,i){return i!==idx;});});}} style={{background:"transparent",border:"1px solid rgba(248,113,113,.2)",borderRadius:5,color:"#f87171",padding:"5px 6px",fontSize:13}}>✕</Btn>
+                    </div>
+                  );
+                })}
+                <Btn onClick={function(){setBlines(function(p){return p.concat([{invId:"",name:"",qty:1,unit:"pcs",price:0}]);});}} style={{marginTop:6,padding:"5px 13px",background:"rgba(56,189,248,.05)",border:"1px dashed rgba(56,189,248,.2)",borderRadius:6,color:"#38bdf8",fontSize:14}}>+ Add Line</Btn>
+                {(function(){
+                  var hasItems = blines.some(function(l){return N(l.qty)>0&&N(l.price)>0;});
+                  if (!hasItems) return null;
+                  var totals = calcTotals(blines);
+                  return (
+                    <div style={{marginTop:12,paddingTop:10,borderTop:"1px solid rgba(255,255,255,.05)",display:"flex",flexDirection:"column",alignItems:"flex-end",gap:4}}>
+                      <div style={{display:"flex",gap:40,fontSize:14,color:"#4a5568"}}><span>Subtotal</span><span style={{color:"#e2e8f0",minWidth:70,textAlign:"right"}}>{fmt(totals.sub)}</span></div>
+                      <div style={{display:"flex",gap:40,fontSize:14,color:"#4a5568"}}><span>Tax (8%)</span><span style={{color:"#e2e8f0",minWidth:70,textAlign:"right"}}>{fmt(totals.tax)}</span></div>
+                      <div style={{display:"flex",gap:40,fontSize:17,fontWeight:800,borderTop:"1px solid rgba(255,255,255,.06)",paddingTop:6,marginTop:2}}><span style={{color:"#38bdf8"}}>TOTAL</span><span style={{color:"#34d399",minWidth:70,textAlign:"right"}}>{fmt(totals.total)}</span></div>
+                    </div>
+                  );
+                })()}
+              </div>
+              <div style={{display:"flex",gap:7,justifyContent:"flex-end"}}>
+                <Btn onClick={function(){setBillingView("list");}} style={{padding:"7px 13px",background:"transparent",border:"1px solid rgba(255,255,255,.07)",borderRadius:7,color:"#2d3748"}}>Cancel</Btn>
+                <Btn onClick={createInvoice} style={{padding:"7px 20px",background:"linear-gradient(135deg,#38bdf8,#818cf8)",border:"none",borderRadius:7,color:"#020917",fontSize:15,fontWeight:800}}>🧾 Create & Save</Btn>
+              </div>
+            </div>
+          )}
+
+          {billingView==="detail" && currentBill && (
+            <div style={{maxWidth:660}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+                <Btn onClick={function(){setBillingView("list");}} style={{padding:"5px 10px",background:"transparent",border:"1px solid rgba(255,255,255,.07)",borderRadius:6,color:"#2d3748",fontSize:14}}>← Back</Btn>
+                <span style={{padding:"4px 9px",borderRadius:4,fontSize:12,fontWeight:700,background:BCFG[currentBill.status].bg,color:BCFG[currentBill.status].c}}>{BCFG[currentBill.status].l}</span>
+              </div>
+              <div style={{background:"rgba(255,255,255,.025)",border:"1px solid rgba(56,189,248,.1)",borderRadius:10,padding:18,marginBottom:8}}>
+                <div style={{display:"flex",justifyContent:"space-between",marginBottom:14}}>
+                  <div style={{display:"flex",alignItems:"center",gap:8}}>
+                    <Logo sz={30}/>
+                    <div style={{fontSize:16,fontWeight:900,background:"linear-gradient(90deg,#38bdf8,#818cf8)",WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent",letterSpacing:4}}>FORGE</div>
+                  </div>
+                  <div style={{textAlign:"right"}}>
+                    <div style={{fontSize:18,fontWeight:800}}>{currentBill.id}</div>
+                    <div style={{fontSize:13,color:"#2d3748"}}>{currentBill.date}</div>
+                    {currentBill.dueDate && <div style={{fontSize:13,color:"#2d3748"}}>Due: {currentBill.dueDate}</div>}
+                  </div>
+                </div>
+                <div style={{paddingTop:12,borderTop:"1px solid rgba(255,255,255,.05)"}}>
+                  <div style={{fontSize:12,color:"#1e2d3d",letterSpacing:2,marginBottom:4}}>BILL TO</div>
+                  <div style={{fontWeight:700,color:"#e2e8f0"}}>{currentBill.clientName}</div>
+                  {currentBill.clientEmail && <div style={{fontSize:14,color:"#4a5568"}}>{currentBill.clientEmail}</div>}
+                </div>
+              </div>
+              <div style={{background:"rgba(255,255,255,.025)",border:"1px solid rgba(56,189,248,.1)",borderRadius:10,padding:14,marginBottom:8}}>
+                <table style={{width:"100%",borderCollapse:"collapse",fontSize:14}}>
+                  <thead>
+                    <tr style={{borderBottom:"1px solid rgba(56,189,248,.1)"}}>
+                      {["Description","Qty","Price","Total"].map(function(h){
+                        return <th key={h} style={{padding:"5px 7px",textAlign:h==="Price"||h==="Total"?"right":"left",color:"#38bdf8",fontSize:12,fontWeight:700}}>{h}</th>;
+                      })}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {currentBill.lines.map(function(l,i){
+                      return (
+                        <tr key={i} style={{borderBottom:"1px solid rgba(255,255,255,.02)"}}>
+                          <td style={{padding:"6px 7px",color:"#c7d2fe"}}>{l.name}</td>
+                          <td style={{padding:"6px 7px"}}>{l.qty}</td>
+                          <td style={{padding:"6px 7px",textAlign:"right"}}>{fmt(l.price)}</td>
+                          <td style={{padding:"6px 7px",textAlign:"right",fontWeight:700,color:"#38bdf8"}}>{fmt(N(l.qty)*N(l.price))}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+                <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:4,marginTop:10,paddingTop:8,borderTop:"1px solid rgba(255,255,255,.05)"}}>
+                  <div style={{display:"flex",gap:50,fontSize:14,color:"#4a5568"}}><span>Subtotal</span><span style={{color:"#e2e8f0"}}>{fmt(currentBill.sub)}</span></div>
+                  <div style={{display:"flex",gap:50,fontSize:14,color:"#4a5568"}}><span>Tax 8%</span><span style={{color:"#e2e8f0"}}>{fmt(currentBill.tax)}</span></div>
+                  <div style={{display:"flex",gap:50,fontSize:16,fontWeight:800,borderTop:"1px solid rgba(255,255,255,.06)",paddingTop:6,marginTop:2}}><span style={{color:"#38bdf8"}}>TOTAL</span><span style={{color:"#34d399"}}>{fmt(currentBill.total)}</span></div>
+                </div>
+              </div>
+              <div style={{display:"flex",gap:5,flexWrap:"wrap",alignItems:"center"}}>
+                {["draft","issued","paid","overdue"].filter(function(s){return s!==currentBill.status;}).map(function(s){
+                  return <Btn key={s} onClick={function(){setBS(currentBill.id,s);}} style={{padding:"6px 11px",fontSize:13,borderRadius:6,border:"1px solid "+BCFG[s].c+"44",background:BCFG[s].c+"11",color:BCFG[s].c,fontWeight:700}}>Mark {s}</Btn>;
+                })}
+                <Btn onClick={function(){printBill(currentBill);}} style={{padding:"6px 14px",fontSize:13,borderRadius:6,border:"1px solid rgba(56,189,248,.35)",background:"rgba(56,189,248,.1)",color:"#38bdf8",fontWeight:700}}>🖨 Print</Btn>
+                <Btn onClick={function(){delBill(currentBill.id);}} style={{padding:"6px 10px",fontSize:13,borderRadius:6,border:"1px solid rgba(248,113,113,.25)",background:"rgba(248,113,113,.07)",color:"#f87171",marginLeft:"auto"}}>Delete</Btn>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* BRIEFING MODAL */}
+      {briefOpen && brief && (
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.88)",zIndex:200,display:"flex",alignItems:"center",justifyContent:"center",padding:14}} onClick={function(){setBriefOpen(false);}}>
+          <div style={{background:"#050d1a",border:"1px solid "+(brief.mode==="AI"?"rgba(52,211,153,.25)":"rgba(129,140,248,.25)"),borderRadius:12,padding:24,maxWidth:520,width:"100%",maxHeight:"80vh",overflowY:"auto"}} onClick={function(e){e.stopPropagation();}}>
+            <div style={{display:"flex",justifyContent:"space-between",marginBottom:14}}>
+              <div>
+                <div style={{fontSize:13,fontWeight:800,color:brief.mode==="AI"?"#34d399":"#818cf8",letterSpacing:3}}>📋 DAILY BRIEFING</div>
+                <div style={{fontSize:12,color:"#1e2d3d",marginTop:2}}>{brief.date} · {brief.t}</div>
+              </div>
+              <Btn onClick={function(){setBriefOpen(false);}} style={{background:"transparent",border:"none",color:"#2d3748",fontSize:18}}>✕</Btn>
+            </div>
+            <div style={{lineHeight:1.8,fontSize:15,color:"#e2e8f0"}}>
+              {brief.text.split("\n").map(function(line, i){
+                var isH = /^[A-Z][A-Z\s]+:/.test(line) && line.length < 60;
+                var isB = line.indexOf("• ")===0 || line.indexOf("- ")===0;
+                return <div key={i} style={{paddingLeft:isB?10:0,borderLeft:isB?"2px solid rgba(56,189,248,.3)":"none",marginLeft:isB?4:0,marginBottom:isH?7:isB?3:1,color:isH?"#38bdf8":"#e2e8f0",fontWeight:isH?800:400,fontSize:isH?9:12,letterSpacing:isH?2:0,marginTop:isH?10:0}}>{line||"\u00a0"}</div>;
+              })}
+            </div>
+            <div style={{display:"flex",gap:7,justifyContent:"flex-end",marginTop:14}}>
+              <Btn onClick={genBrief} style={{padding:"6px 12px",background:"rgba(56,189,248,.07)",border:"1px solid rgba(56,189,248,.2)",borderRadius:6,color:"#38bdf8",fontSize:13}}>⟳ Regenerate</Btn>
+              <Btn onClick={function(){setBriefOpen(false);}} style={{padding:"6px 16px",background:"linear-gradient(135deg,#38bdf8,#818cf8)",border:"none",borderRadius:6,color:"#020917",fontSize:14,fontWeight:800}}>Got it ✓</Btn>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* SETTINGS */}
+      {settings && (
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.88)",zIndex:200,display:"flex",alignItems:"center",justifyContent:"center",padding:14}} onClick={function(){setSettings(false);}}>
+          <div style={{background:"#050d1a",border:"1px solid rgba(56,189,248,.15)",borderRadius:12,padding:24,maxWidth:380,width:"100%"}} onClick={function(e){e.stopPropagation();}}>
+            <div style={{fontSize:18,fontWeight:700,color:"#38bdf8",letterSpacing:1,marginBottom:14,fontFamily:"'Space Grotesk',sans-serif"}}>⚙ Storage & Settings</div>
+            <div style={{background:"rgba(52,211,153,.03)",border:"1px solid rgba(52,211,153,.1)",borderRadius:8,padding:14,marginBottom:12}}>
+              {[["Inventory items",inv.length],["Invoices",bills.length],["Brain decisions",mem.length],["Total value",fmt(tv)],["Last saved",savedAt||"—"]].map(function(item){
+                return <div key={item[0]} style={{display:"flex",justifyContent:"space-between",fontSize:14,marginBottom:5}}>
+                  <span style={{color:"#4a5568"}}>{item[0]}</span><span style={{color:"#34d399",fontWeight:700}}>{item[1]}</span>
+                </div>;
+              })}
+            </div>
+            <div style={{background:"rgba(56,189,248,.03)",border:"1px solid rgba(56,189,248,.15)",borderRadius:8,padding:14,marginBottom:12}}>
+              <div style={{fontSize:13,color:"#38bdf8",fontWeight:700,marginBottom:6,letterSpacing:1}}>🔑 ANTHROPIC API KEY</div>
+              <div style={{fontSize:13,color:"#4a5568",marginBottom:8}}>Required for AI Brain features. Get yours at <span style={{color:"#38bdf8"}}>console.anthropic.com</span></div>
+              <input
+                type="password"
+                placeholder="sk-ant-..."
+                value={apiKey}
+                onChange={function(e){ setApiKeyState(e.target.value); }}
+                style={{width:"100%",padding:"8px 10px",background:"rgba(0,0,0,.4)",border:"1px solid rgba(56,189,248,.2)",borderRadius:6,color:"#e2e8f0",fontSize:14,fontFamily:"'JetBrains Mono',monospace",outline:"none",marginBottom:8}}
+              />
+              <Btn onClick={function(){
+                localStorage.setItem("forge_api_key", apiKey);
+                checkNet();
+                showToast("API key saved — connecting…","ok");
+              }} style={{width:"100%",padding:"7px",background:"rgba(56,189,248,.12)",border:"1px solid rgba(56,189,248,.3)",borderRadius:6,color:"#38bdf8",fontSize:14,fontWeight:700}}>Save & Connect ↗</Btn>
+              {apiKey && <Btn onClick={function(){ setApiKeyState(""); localStorage.removeItem("forge_api_key"); setAiOn(false); showToast("API key removed","warn"); }} style={{width:"100%",padding:"5px",background:"transparent",border:"none",color:"#4a5568",fontSize:13,marginTop:4}}>Remove key</Btn>}
+            </div>
+            <div style={{background:"rgba(248,113,113,.04)",border:"1px solid rgba(248,113,113,.12)",borderRadius:8,padding:12,marginBottom:12}}>
+              <div style={{fontSize:13,color:"#f87171",fontWeight:700,marginBottom:4}}>⚠ DANGER ZONE</div>
+              <div style={{fontSize:14,color:"#4a5568",marginBottom:9}}>Wipes all data and restores demo inventory.</div>
+              <Btn onClick={resetAll} style={{width:"100%",padding:"8px",background:"rgba(248,113,113,.1)",border:"1px solid rgba(248,113,113,.3)",borderRadius:7,color:"#f87171",fontSize:14,fontWeight:700}}>🗑 Reset All Data</Btn>
+            </div>
+            <Btn onClick={function(){setSettings(false);}} style={{width:"100%",padding:"9px",background:"linear-gradient(135deg,#38bdf8,#818cf8)",border:"none",borderRadius:7,color:"#020917",fontSize:15,fontWeight:800}}>Close ✓</Btn>
+          </div>
+        </div>
+      )}
+
+      {/* EDIT ITEM MODAL */}
+      {editItem && (
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.88)",zIndex:200,display:"flex",alignItems:"center",justifyContent:"center",padding:14}} onClick={function(){setEditItem(null);}}>
+          <div style={{background:"#050d1a",border:"1px solid rgba(56,189,248,.2)",borderRadius:14,padding:24,maxWidth:500,width:"100%"}} onClick={function(e){e.stopPropagation();}}>
+            <div style={{fontSize:18,fontWeight:800,color:"#38bdf8",letterSpacing:1,marginBottom:16,fontFamily:"'Space Grotesk',sans-serif"}}>✏ Edit Item</div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:14}}>
+              {[
+                ["Name",        "name",     "text",   null],
+                ["Qty",         "qty",      "number", null],
+                ["Unit",        "unit",     "text",   null],
+                ["Reorder Lvl", "reorder",  "number", null],
+                ["Daily Usage", "usage",    "number", null],
+                ["Lead Days",   "lead",     "number", null],
+                ["Cost ₹/Unit", "cost",     "number", null],
+                ["Supplier",    "supplier", "text",   null],
+              ].map(function(f){
+                return (
+                  <div key={f[1]}>
+                    <div style={{fontSize:13,color:"#4a5568",fontWeight:600,marginBottom:4,letterSpacing:.5}}>{f[0]}</div>
+                    <input
+                      type={f[2]}
+                      min={f[2]==="number"?"0":undefined}
+                      step={f[1]==="cost"?"0.01":f[1]==="usage"?"0.1":undefined}
+                      value={editItem[f[1]]||""}
+                      onChange={function(e){ var v=e.target.value; setEditItem(function(p){return Object.assign({},p,{[f[1]]:v});}); }}
+                      style={{width:"100%",padding:"8px 10px",background:"rgba(0,0,0,.4)",border:"1px solid rgba(56,189,248,.18)",borderRadius:6,color:"#e2e8f0",fontSize:15,outline:"none"}}
+                    />
+                  </div>
+                );
+              })}
+              {/* Location dropdown */}
+              <div style={{gridColumn:"1/-1"}}>
+                <div style={{fontSize:13,color:"#4a5568",fontWeight:600,marginBottom:4,letterSpacing:.5}}>Location</div>
+                <select value={editItem.location||"Main Warehouse"} onChange={function(e){setEditItem(function(p){return Object.assign({},p,{location:e.target.value});});}} style={{width:"100%",padding:"8px 10px",background:"rgba(0,0,0,.4)",border:"1px solid rgba(56,189,248,.18)",borderRadius:6,color:"#e2e8f0",fontSize:15,outline:"none"}}>
+                  {LOCATIONS.map(function(l){return <option key={l}>{l}</option>;})}
+                </select>
+              </div>
+            </div>
+            {/* Live preview */}
+            <div style={{background:"rgba(56,189,248,.04)",border:"1px solid rgba(56,189,248,.1)",borderRadius:8,padding:"10px 14px",marginBottom:14,display:"flex",gap:12,flexWrap:"wrap"}}>
+              {[
+                ["Days of stock", (N(editItem.usage)>0?Math.floor(N(editItem.qty)/N(editItem.usage))+"d":"∞"), "#38bdf8"],
+                ["Total value",   fmt(N(editItem.qty)*N(editItem.cost)), "#818cf8"],
+                ["Reorder at",    editItem.reorder+" "+editItem.unit, "#fbbf24"],
+              ].map(function(it){
+                return <div key={it[0]} style={{flex:1,minWidth:100}}>
+                  <div style={{fontSize:12,color:"#2d3748",marginBottom:2}}>{it[0]}</div>
+                  <div style={{fontSize:16,fontWeight:800,color:it[2]}}>{it[1]}</div>
+                </div>;
+              })}
+            </div>
+            <div style={{display:"flex",gap:8}}>
+              <Btn onClick={function(){setEditItem(null);}} style={{flex:1,padding:"9px",background:"transparent",border:"1px solid rgba(255,255,255,.07)",borderRadius:7,color:"#4a5568",fontSize:15}}>Cancel</Btn>
+              <Btn onClick={function(){
+                setInv(function(p){ return p.map(function(item){
+                  if (item.id !== editItem.id) return item;
+                  return Object.assign({},item,{
+                    name:     editItem.name.trim()||item.name,
+                    qty:      N(editItem.qty),
+                    unit:     editItem.unit||item.unit,
+                    reorder:  N(editItem.reorder),
+                    usage:    N(editItem.usage),
+                    lead:     N(editItem.lead)||1,
+                    cost:     N(editItem.cost),
+                    supplier: editItem.supplier||item.supplier,
+                    location: editItem.location||item.location||"Main Warehouse"
+                  });
+                });});
+                logMovement(editItem.id, editItem.name, "ADJUST", 0, N(editItem.qty), "Manual Edit", "");
+                addLog("✏ Updated "+editItem.name, "ok");
+                showToast("✓ "+editItem.name+" updated!");
+                setEditItem(null);
+              }} style={{flex:2,padding:"9px",background:"linear-gradient(135deg,#38bdf8,#818cf8)",border:"none",borderRadius:7,color:"#020917",fontSize:15,fontWeight:800}}>💾 Save Changes</Btn>
+            </div>
+            {N(editItem.qty) < N(editItem.reorder) && (
+              <Btn onClick={function(){sendLowStockEmail(editItem);}} style={{width:"100%",marginTop:8,padding:"8px",background:"rgba(251,191,36,.08)",border:"1px solid rgba(251,191,36,.3)",borderRadius:7,color:"#fbbf24",fontSize:14,fontWeight:700}}>📧 Email Supplier for Restock</Btn>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* BARCODE SCANNER MODAL */}
+      {scanOpen && (
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.93)",zIndex:300,display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:14,padding:20}}>
+          <div style={{fontSize:17,fontWeight:800,color:"#34d399",letterSpacing:2}}>📷 BARCODE SCANNER</div>
+          <video ref={videoRef} style={{width:"100%",maxWidth:400,borderRadius:12,border:"2px solid rgba(56,189,248,.4)",background:"#000"}} autoPlay playsInline muted/>
+          {scanResult && <div style={{padding:"8px 18px",borderRadius:8,background:"rgba(52,211,153,.15)",border:"1px solid rgba(52,211,153,.4)",color:"#34d399",fontSize:16,fontWeight:700}}>✓ {scanResult}</div>}
+          <Btn onClick={stopScanner} style={{padding:"9px 28px",background:"rgba(248,113,113,.15)",border:"1px solid rgba(248,113,113,.35)",borderRadius:8,color:"#f87171",fontSize:15,fontWeight:700}}>✕ Close Scanner</Btn>
+        </div>
+      )}
+
+      {/* PURCHASE ORDERS TAB */}
+      {view==="po" && (
+        <div style={{flex:1,padding:12,overflowY:"auto",position:"relative",zIndex:1}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12,flexWrap:"wrap",gap:8}}>
+            <div style={{fontSize:16,fontWeight:800,color:"#38bdf8",letterSpacing:2}}>📋 PURCHASE ORDERS</div>
+            <Btn onClick={function(){setPoView(poView==="create"?"list":"create");}} style={{padding:"7px 16px",background:"linear-gradient(135deg,#38bdf8,#818cf8)",border:"none",borderRadius:7,color:"#020917",fontSize:15,fontWeight:800}}>{poView==="create"?"← Back":"+ New PO"}</Btn>
+          </div>
+
+          {/* PO stats */}
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(110px,1fr))",gap:8,marginBottom:12}}>
+            {[["Total POs",pos.length,"#38bdf8"],["Draft",pos.filter(function(p){return p.status==="draft";}).length,"#fbbf24"],["Sent",pos.filter(function(p){return p.status==="sent";}).length,"#818cf8"],["Received",pos.filter(function(p){return p.status==="received";}).length,"#34d399"]].map(function(s){
+              return <div key={s[0]} style={{background:"rgba(255,255,255,.03)",border:"1px solid rgba(255,255,255,.05)",borderTop:"3px solid "+s[2],borderRadius:8,padding:"9px 11px"}}>
+                <div style={{fontSize:17,fontWeight:800,color:s[2]}}>{s[1]}</div>
+                <div style={{fontSize:12,color:"#2d3748",letterSpacing:2,marginTop:2}}>{s[0].toUpperCase()}</div>
+              </div>;
+            })}
+          </div>
+
+          {poView==="list" && (
+            <div>
+              {pos.length===0 && <div style={{textAlign:"center",padding:40,color:"#2d3748",fontSize:15}}>No purchase orders yet. Create one to restock from suppliers.</div>}
+              {pos.map(function(po){
+                var scol = {draft:"#fbbf24",sent:"#818cf8",received:"#34d399"}[po.status]||"#4a5568";
+                return <div key={po.id} style={{background:"rgba(255,255,255,.02)",border:"1px solid rgba(255,255,255,.06)",borderRadius:10,padding:14,marginBottom:8}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:6}}>
+                    <div>
+                      <div style={{fontWeight:800,color:"#38bdf8",fontSize:16}}>{po.id}</div>
+                      <div style={{fontSize:14,color:"#818cf8",marginTop:2}}>Supplier: {po.supplier}</div>
+                      <div style={{fontSize:13,color:"#2d3748",marginTop:2}}>{po.lines.length} items · {po.date}{po.expectedDate?" · Expected: "+po.expectedDate:""}</div>
+                    </div>
+                    <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:5}}>
+                      <span style={{padding:"2px 8px",borderRadius:4,fontSize:12,fontWeight:700,background:scol+"22",color:scol,border:"1px solid "+scol+"44"}}>{po.status.toUpperCase()}</span>
+                      <div style={{fontSize:15,fontWeight:800,color:"#34d399"}}>{fmt(po.total)}</div>
+                    </div>
+                  </div>
+                  <div style={{marginTop:8,display:"flex",gap:5,flexWrap:"wrap"}}>
+                    {po.status==="draft" && <Btn onClick={function(){setPos(function(p){return p.map(function(o){return o.id===po.id?Object.assign({},o,{status:"sent"}):o;});});showToast("PO sent to "+po.supplier);addLog("📤 "+po.id+" sent to "+po.supplier,"ok");}} style={{padding:"4px 10px",fontSize:13,background:"rgba(129,140,248,.1)",border:"1px solid rgba(129,140,248,.25)",borderRadius:5,color:"#818cf8",fontWeight:700}}>📤 Mark Sent</Btn>}
+                    {po.status!=="received" && <Btn onClick={function(){receivePO(po);}} style={{padding:"4px 10px",fontSize:13,background:"rgba(52,211,153,.1)",border:"1px solid rgba(52,211,153,.25)",borderRadius:5,color:"#34d399",fontWeight:700}}>✓ Receive Stock</Btn>}
+                    <div style={{fontSize:13,color:"#2d3748",padding:"4px 0"}}>{po.lines.map(function(l){return l.itemName+" ("+l.qty+")";}).join(", ")}</div>
+                  </div>
+                </div>;
+              })}
+            </div>
+          )}
+
+          {poView==="create" && (
+            <div style={{background:"rgba(255,255,255,.025)",border:"1px solid rgba(56,189,248,.1)",borderRadius:10,padding:16,maxWidth:700}}>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:9,marginBottom:12}}>
+                <div><div style={{fontSize:13,color:"#4a5568",fontWeight:600,marginBottom:4}}>Supplier *</div><input style={{width:"100%",padding:"8px 10px",background:"rgba(0,0,0,.4)",border:"1px solid rgba(56,189,248,.18)",borderRadius:6,color:"#e2e8f0",fontSize:15,outline:"none"}} value={poForm.supplier} onChange={function(e){setPoForm(function(p){return Object.assign({},p,{supplier:e.target.value});})}} placeholder="Supplier name"/></div>
+                <div><div style={{fontSize:13,color:"#4a5568",fontWeight:600,marginBottom:4}}>Expected Date</div><input type="text" style={{width:"100%",padding:"8px 10px",background:"rgba(0,0,0,.4)",border:"1px solid rgba(56,189,248,.18)",borderRadius:6,color:"#e2e8f0",fontSize:15,outline:"none"}} value={poForm.expectedDate} onChange={function(e){setPoForm(function(p){return Object.assign({},p,{expectedDate:e.target.value});})}} placeholder="e.g. 15 March 2026"/></div>
+                <div style={{gridColumn:"1/-1"}}><div style={{fontSize:13,color:"#4a5568",fontWeight:600,marginBottom:4}}>Notes</div><input style={{width:"100%",padding:"8px 10px",background:"rgba(0,0,0,.4)",border:"1px solid rgba(56,189,248,.18)",borderRadius:6,color:"#e2e8f0",fontSize:15,outline:"none"}} value={poForm.notes} onChange={function(e){setPoForm(function(p){return Object.assign({},p,{notes:e.target.value});})}} placeholder="Optional notes"/></div>
+              </div>
+              <div style={{fontSize:13,color:"#38bdf8",letterSpacing:2,fontWeight:700,marginBottom:8}}>LINE ITEMS</div>
+              {poLines.map(function(line,idx){
+                return <div key={idx} style={{display:"grid",gridTemplateColumns:"2fr 1fr 1fr 1fr 24px",gap:6,marginBottom:6,alignItems:"center"}}>
+                  <select style={{padding:"7px 9px",background:"rgba(0,0,0,.4)",border:"1px solid rgba(56,189,248,.18)",borderRadius:6,color:"#e2e8f0",fontSize:14,outline:"none"}} value={line.itemName} onChange={function(e){var v=e.target.value;var ii=inv.find(function(i){return i.name===v;});setPoLines(function(p){return p.map(function(l,i){return i===idx?Object.assign({},l,{itemName:v,unit:ii?ii.unit:l.unit,cost:ii?ii.cost:l.cost}):l;});});}}>
+                    <option value="">— Select item —</option>
+                    {inv.map(function(i){return <option key={i.id}>{i.name}</option>;})}
+                    <option value="__custom__">+ Custom item…</option>
+                  </select>
+                  {line.itemName==="__custom__" ? <input style={{padding:"7px",background:"rgba(0,0,0,.4)",border:"1px solid rgba(56,189,248,.18)",borderRadius:6,color:"#e2e8f0",fontSize:14,outline:"none"}} placeholder="Item name" onChange={function(e){var v=e.target.value;setPoLines(function(p){return p.map(function(l,i){return i===idx?Object.assign({},l,{itemName:v}):l;});});}}/> : <div/>}
+                  <input type="number" min="1" style={{padding:"7px",background:"rgba(0,0,0,.4)",border:"1px solid rgba(56,189,248,.18)",borderRadius:6,color:"#e2e8f0",fontSize:14,outline:"none"}} value={line.qty} onChange={function(e){var v=e.target.value;setPoLines(function(p){return p.map(function(l,i){return i===idx?Object.assign({},l,{qty:v}):l;});});}} placeholder="Qty"/>
+                  <input type="number" min="0" step="0.01" style={{padding:"7px",background:"rgba(0,0,0,.4)",border:"1px solid rgba(56,189,248,.18)",borderRadius:6,color:"#e2e8f0",fontSize:14,outline:"none"}} value={line.cost} onChange={function(e){var v=e.target.value;setPoLines(function(p){return p.map(function(l,i){return i===idx?Object.assign({},l,{cost:v}):l;});});}} placeholder="₹/unit"/>
+                  <Btn onClick={function(){setPoLines(function(p){return p.filter(function(_,i){return i!==idx;});});}} style={{background:"transparent",border:"1px solid rgba(248,113,113,.2)",borderRadius:5,color:"#f87171",padding:"5px 6px",fontSize:13}}>✕</Btn>
+                </div>;
+              })}
+              <Btn onClick={function(){setPoLines(function(p){return p.concat([{itemName:"",qty:1,unit:"pcs",cost:0}]);});}} style={{marginTop:6,padding:"5px 13px",background:"rgba(56,189,248,.05)",border:"1px dashed rgba(56,189,248,.2)",borderRadius:6,color:"#38bdf8",fontSize:14}}>+ Add Item</Btn>
+              <div style={{marginTop:12,paddingTop:10,borderTop:"1px solid rgba(255,255,255,.05)",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <div style={{fontSize:17,fontWeight:800,color:"#34d399"}}>Total: {fmt(poLines.reduce(function(a,l){return a+N(l.qty)*N(l.cost);},0))}</div>
+                <Btn onClick={createPO} style={{padding:"9px 24px",background:"linear-gradient(135deg,#38bdf8,#818cf8)",border:"none",borderRadius:7,color:"#020917",fontSize:16,fontWeight:800}}>📋 Create PO</Btn>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* HISTORY TAB */}
+      {view==="history" && (
+        <div style={{flex:1,padding:12,overflowY:"auto",position:"relative",zIndex:1}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12,flexWrap:"wrap",gap:8}}>
+            <div style={{fontSize:16,fontWeight:800,color:"#38bdf8",letterSpacing:2}}>📈 STOCK MOVEMENT HISTORY</div>
+            <div style={{fontSize:13,color:"#2d3748"}}>{movements.length} records</div>
+          </div>
+
+          {/* Low stock alerts with email buttons */}
+          {inv.filter(function(i){return i.qty<i.reorder;}).length > 0 && (
+            <div style={{background:"rgba(251,191,36,.05)",border:"1px solid rgba(251,191,36,.2)",borderRadius:10,padding:12,marginBottom:12}}>
+              <div style={{fontSize:13,color:"#fbbf24",fontWeight:800,letterSpacing:2,marginBottom:8}}>⚠ LOW STOCK ALERTS — EMAIL SUPPLIER</div>
+              {inv.filter(function(i){return i.qty<i.reorder;}).map(function(item){
+                return <div key={item.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"6px 0",borderBottom:"1px solid rgba(255,255,255,.04)"}}>
+                  <div>
+                    <span style={{color:"#fbbf24",fontWeight:700,fontSize:15}}>{item.name}</span>
+                    <span style={{color:"#2d3748",fontSize:13,marginLeft:8}}>{item.qty} {item.unit} remaining (reorder at {item.reorder})</span>
+                    <span style={{color:"#4a5568",fontSize:13,marginLeft:6}}>· {item.supplier}</span>
+                  </div>
+                  <Btn onClick={function(){sendLowStockEmail(item);}} style={{padding:"3px 10px",fontSize:13,background:"rgba(251,191,36,.12)",border:"1px solid rgba(251,191,36,.3)",borderRadius:5,color:"#fbbf24",fontWeight:700,flexShrink:0}}>📧 Email</Btn>
+                </div>;
+              })}
+            </div>
+          )}
+
+          {/* Filter */}
+          <div style={{display:"flex",gap:5,marginBottom:10,flexWrap:"wrap"}}>
+            {["all","IN","OUT","ADJUST"].map(function(f){
+              return <Btn key={f} onClick={function(){setHistFilter(f);}} style={{padding:"3px 9px",fontSize:12,borderRadius:4,border:"1px solid "+(histFilter===f?"#38bdf8":"rgba(255,255,255,.07)"),background:histFilter===f?"rgba(56,189,248,.1)":"transparent",color:histFilter===f?"#38bdf8":"#2d3748"}}>{f}</Btn>;
+            })}
+          </div>
+
+          {movements.length===0 && <div style={{textAlign:"center",padding:40,color:"#2d3748",fontSize:15}}>No movements yet. Add items or create invoices to see history here.</div>}
+
+          <div style={{overflowX:"auto"}}>
+            <table style={{width:"100%",borderCollapse:"collapse",fontSize:14}}>
+              <thead>
+                <tr style={{borderBottom:"1px solid rgba(56,189,248,.12)"}}>
+                  {["Date","Item","Type","Qty Change","Balance","Reason","Ref"].map(function(h){
+                    return <th key={h} style={{padding:"6px 8px",textAlign:"left",color:"#38bdf8",fontSize:12,letterSpacing:2,fontWeight:700,whiteSpace:"nowrap"}}>{h}</th>;
+                  })}
+                </tr>
+              </thead>
+              <tbody>
+                {movements.filter(function(m){return histFilter==="all"||m.type===histFilter;}).map(function(m){
+                  var tcol = m.type==="IN"?"#34d399":m.type==="OUT"?"#f87171":"#fbbf24";
+                  return <tr key={m.id} style={{borderBottom:"1px solid rgba(255,255,255,.025)"}}>
+                    <td style={{padding:"6px 8px",color:"#2d3748",fontSize:13,whiteSpace:"nowrap"}}>{m.date}</td>
+                    <td style={{padding:"6px 8px"}}><b style={{color:"#c7d2fe"}}>{m.itemName}</b></td>
+                    <td style={{padding:"6px 8px"}}><span style={{padding:"2px 6px",borderRadius:3,fontSize:11,fontWeight:800,background:tcol+"22",color:tcol}}>{m.type}</span></td>
+                    <td style={{padding:"6px 8px",color:tcol,fontWeight:700}}>{m.type==="IN"?"+":m.type==="OUT"?"-":""}{m.qty}</td>
+                    <td style={{padding:"6px 8px",color:"#e2e8f0",fontWeight:600}}>{m.balance}</td>
+                    <td style={{padding:"6px 8px",color:"#4a5568",fontSize:13}}>{m.reason}</td>
+                    <td style={{padding:"6px 8px",color:"#818cf8",fontSize:13}}>{m.ref}</td>
+                  </tr>;
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* TOAST */}
+      {toast && (
+        <div style={{position:"fixed",bottom:14,left:"50%",transform:"translateX(-50%)",padding:"8px 18px",borderRadius:99,background:toast.type==="error"?"rgba(248,113,113,.95)":toast.type==="warn"?"rgba(251,191,36,.95)":"rgba(52,211,153,.95)",color:"#020917",fontSize:14,fontWeight:800,zIndex:999,boxShadow:"0 6px 28px rgba(0,0,0,.6)",whiteSpace:"nowrap"}}>
+          {toast.m}
+        </div>
+      )}
+
+      {/* FLOAT BRIEFING BTN */}
+      {brief && !briefOpen && (
+        <Btn onClick={function(){setBriefOpen(true);}} style={{position:"fixed",bottom:14,right:14,padding:"6px 12px",background:"rgba(56,189,248,.1)",border:"1px solid rgba(56,189,248,.25)",borderRadius:8,color:"#38bdf8",fontSize:13,fontWeight:700,zIndex:90}}>📋 Briefing</Btn>
+      )}
+    </div>
+  );
+}
+
+var root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<App/>);
+</script>
+</body>
+</html>
